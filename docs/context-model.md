@@ -50,5 +50,4 @@ Two goals, **no quality loss**:
 - Lowering `MAX_THINKING_TOKENS` (off-limits per Irina).
 - Lowering `max_iterations` (kept per Irina).
 
-This file is local to the Millennium orchestration copy and should not import
-domain context from other workspaces.
+_Inspired by the Claude-only sibling copy at `andrey/orchestration` (`docs/context-model.md`, `run-chain.sh`); usage accounting is new here (that copy has none)._

@@ -101,7 +101,9 @@
     },
     "code_reviewer": {
       "agent": "claude_reviewer",
-      "role": "Software Engineering Code Reviewer"
+      "role": "Software Engineering Code Reviewer",
+      "enabled": false,
+      "_disabled_comment": "2026-08-17: same-family peer-Claude code-review гейт ОТКЛЮЧЁН — он штамповал PASS (телеметрия reviewer_miss: ~2% NEEDS_FIX против ~63% блоков архитектора на тех же диффах). При enabled:false ячейка пропускается, первым реальным гейтом становится Architect, финальным — Tech Lead. Ячейка остаётся в roster.cells, иначе позиционная цепочка сдвинется и молча переназначит роли."
     },
     "architect": {
       "agent": "codex",

@@ -1,8 +1,8 @@
 """Unit tests for config loading + cross-config consistency.
 
-The tests assert chain structure and internal consistency, not a product-domain
-context. The consistency test catches missing role files or agent role allow-list
-drift.
+Copy-agnostic: it asserts CHAIN STRUCTURE and INTERNAL CONSISTENCY, never
+a specific arbiter model. The consistency test is the guard that would have caught the
+agents.json roles-allowlist miss (a role used in a workflow but not allowed for its agent).
 """
 import os
 import subprocess
@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from orchestrator.verdicts import ROLE_VERDICTS
-from orchestrator.config import load_config, RunContext
+from orchestrator.config import git_clean_env, load_config, RunContext
 
 WORKFLOWS = ("architecture", "development", "investigation")
 
@@ -113,9 +113,13 @@ class TestCaptureDiffBaseline(unittest.TestCase):
         cls.agents_cfg, cls.wf = load_config()
 
     def _git(self, repo, *args):
+        # env=git_clean_env(): the pre-commit hook runs this suite with GIT_DIR and
+        # GIT_INDEX_FILE exported, and GIT_DIR beats `-C`. Without the scrub these
+        # helpers init/commit against the OUTER repo, the temp repo never gets a
+        # commit, and every file reads as deleted-and-untracked at once.
         return subprocess.run(
             ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", repo, *args],
-            capture_output=True, text=True, check=True)
+            capture_output=True, text=True, check=True, env=git_clean_env())
 
     def _init_repo(self, path):
         os.makedirs(path, exist_ok=True)

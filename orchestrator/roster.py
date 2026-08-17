@@ -40,8 +40,8 @@ UNAVAILABLE_MARKERS = (
     "high demand", "resource_exhausted", "insufficient_quota",
     "you've reached", "you have reached", "try again later", "service unavailable",
     # billing/credit exhaustion (e.g. DeepSeek HTTP 402 -> urllib "HTTP Error 402:
-    # Payment Required"). Matched precisely, NOT as bare "402", because domain logs
-    # may contain unrelated numeric status fields and would false-positive.
+    # Payment Required"). Matched as the phrase, NOT as bare "402", so a literal "402"
+    # inside agent output cannot false-positive as a usage-limit signal.
     "payment required", "insufficient balance",
     # auth / credentials not configured for THIS agent (e.g. gemini run without
     # GEMINI_API_KEY sourced -> "Please set an Auth method ... GEMINI_API_KEY").
@@ -71,6 +71,10 @@ class Roster:
         self.adapters = adapters
         self.exhausted: set[str] = set()
         self.enabled = bool(self.chain and self.cells)
+        # cell -> role, so shift-left can respect each agent's `roles` allowlist.
+        self.cell_roles = {c: (wf_block.get(c) or {}).get("role")
+                           for c in self.cells
+                           if isinstance(wf_block.get(c), dict)}
 
     def mark_exhausted(self, agent: str) -> None:
         self.exhausted.add(agent)
@@ -86,6 +90,27 @@ class Roster:
         ok, _ = a.availability()
         return ok
 
+    def _eligible(self, agent: str, cell: str) -> bool:
+        """Live AND permitted to hold this cell's role.
+
+        `agents.json` already carries a per-agent `roles` allowlist; shift-left used
+        to ignore it and fill cells positionally. Observed 2026-08-01: `claude` (the
+        only agent with `can_edit: true` and the only one allowed to be Responsible
+        Developer) hit HTTP 429, so the developer cell shifted left through
+        `claude_reviewer` to `codex` — a read-only-sandbox agent that cannot write at
+        all. It dutifully reported "blocked", the architect escalated, the arbiter
+        429'd too, and the run died as HUMAN_REQUIRED after burning five steps on a
+        cell that could never have produced code. Honouring the allowlist turns that
+        into an immediate, accurate "no live agent for role 'Responsible Developer'".
+        """
+        if not self._live(agent):
+            return False
+        role = self.cell_roles.get(cell)
+        allowed = (self.adapters[agent].cfg or {}).get("roles")
+        if role and allowed and role not in allowed:
+            return False
+        return True
+
     def assign(self) -> dict:
         """Return {cell: agent_or_None} for the current liveness snapshot."""
         out: dict[str, str | None] = {}
@@ -94,16 +119,24 @@ class Roster:
         # 1) pinned cells: hold to the pinned agent, else the next live same-family Claude.
         for cell, pin in self.pinned.items():
             candidates = [pin] + [a for a in self.chain if is_claude(a) and a != pin]
-            chosen = next((a for a in candidates if self._live(a) and a not in used), None)
+            chosen = next((a for a in candidates
+                           if self._eligible(a, cell) and a not in used), None)
             out[cell] = chosen
             if chosen:
                 used.add(chosen)
 
-        # 2) positional fill for the rest, from the live chain, skipping pinned agents.
+        # 2) fill the rest from the chain in order, skipping pinned agents and any
+        #    agent not permitted to hold that cell's role. With every agent live and
+        #    eligible this reproduces the previous positional mapping
+        #    (cell[i] = chain[i]); it only diverges where the old code would have
+        #    handed a cell to an agent the allowlist forbids.
         pinned_agents = set(self.pinned.values())
-        live = [a for a in self.chain
-                if self._live(a) and a not in used and a not in pinned_agents]
         nonpinned = [c for c in self.cells if c not in self.pinned]
-        for idx, cell in enumerate(nonpinned):
-            out[cell] = live[idx] if idx < len(live) else None
+        for cell in nonpinned:
+            chosen = next((a for a in self.chain
+                           if a not in used and a not in pinned_agents
+                           and self._eligible(a, cell)), None)
+            out[cell] = chosen
+            if chosen:
+                used.add(chosen)
         return out

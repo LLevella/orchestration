@@ -139,6 +139,9 @@ class Engine:
                     + " — the fallback chain is exhausted.")
             system = ctx.load_role(role, spec.get("wrapper"))
             before = ctx.guard.snapshot() if not allow_edit else None
+            # Branches are captured for EVERY step, editable ones included: a
+            # `git checkout` changes no file, so the snapshot above cannot see it.
+            branches_before = ctx.guard.branches()
             resp = ctx.adapters[agent].run(system, user_prompt,
                                            allow_edit=allow_edit, step_id=step_id)
             resp.role = role
@@ -154,7 +157,8 @@ class Engine:
                 resp = self._repair_verdict(step_id, agent, role, system,
                                             user_prompt, resp, allow_edit)
             return self._finalize(step_id, agent, role, system, user_prompt,
-                                   resp, before, parse, iteration, phase, allow_edit)
+                                   resp, before, parse, iteration, phase, allow_edit,
+                                   branches_before)
 
     def _shift_if_exhausted(self, step_id, cell, agent, resp) -> bool:
         """If `resp` is an EXHAUSTED-class failure for a roster-managed cell, drop
@@ -174,19 +178,32 @@ class Engine:
         return bool(nxt and nxt != agent)
 
     def _finalize(self, step_id, agent, role, system, user_prompt, resp, before,
-                  parse, iteration, phase, allow_edit):
-        """Guard-check a read-only step, log it, and return (resp, verdict)."""
+                  parse, iteration, phase, allow_edit, branches_before=None):
+        """Guard-check a step, log it, and return (resp, verdict).
+
+        Two independent checks: the working tree must be untouched by a read-only
+        role, and the checked-out branch must be unmoved by ANY role.
+        """
         ctx = self.ctx
+
+        def _abort(e):
+            ctx.tx.event(kind="guard_violation", step=step_id, detail=str(e))
+            resp.error = ((resp.error or "") + "\n" + str(e)).strip()
+            verdict = extract_verdict(role, resp.text) if parse else None
+            ctx.tx.step(step_id, agent, role, system, user_prompt, resp, verdict, iteration, phase)
+            raise e
+
+        try:
+            ctx.guard.assert_branch_unchanged(branches_before, ctx.guard.branches(),
+                                              agent, step_id)
+        except GuardViolation as e:
+            _abort(e)
         if not allow_edit:
             after = ctx.guard.snapshot()
             try:
                 ctx.guard.assert_unchanged(before, after, agent, step_id)
             except GuardViolation as e:
-                ctx.tx.event(kind="guard_violation", step=step_id, detail=str(e))
-                resp.error = (resp.error + "\n" + str(e)).strip()
-                verdict = extract_verdict(role, resp.text) if parse else None
-                ctx.tx.step(step_id, agent, role, system, user_prompt, resp, verdict, iteration, phase)
-                raise
+                _abort(e)
         verdict = extract_verdict(role, resp.text) if parse else None
         ctx.tx.step(step_id, agent, role, system, user_prompt, resp, verdict, iteration, phase)
         if resp.status != OK:
@@ -245,6 +262,20 @@ class Engine:
         return resp
 
     def _finish(self, status, reason):
+        # Gate-quality summary: how often a later gate blocked a diff the FIRST gate had
+        # already passed. Written once, before the terminal status, so every dev run
+        # carries its own miss count instead of needing a cross-run query to notice a
+        # reviewer that has quietly stopped blocking.
+        if self.workflow == "development" and not getattr(self, "_miss_reported", False):
+            self._miss_reported = True
+            misses = getattr(self, "_miss_count", 0)
+            on = self._gate_enabled("code_reviewer")
+            self.ctx.tx.event(kind="reviewer_miss_summary", misses=misses, code_review_enabled=on)
+            self.ctx.tx.md("\n## Gate quality\n\n" + (
+                f"Code-Reviewer misses this run: **{misses}** — times a later gate blocked a "
+                "diff the Code Reviewer had passed.\n" if on else
+                "Code-review gate **disabled** for this run; the Architect was the first gate, "
+                "so no miss rate is measured.\n"))
         return self.ctx.tx.finish(status, reason)
 
     # ---- public entrypoint -------------------------------------------
@@ -293,7 +324,8 @@ class Engine:
                 "the architecture, and you are the primary reviewer. Run your implementation-"
                 "feasibility check per your role: is it buildable within the stated scope and a "
                 "single dev run, are the interfaces/boundaries/tests clear, does it hide a "
-                "migration / API-break / infra / concurrency / runtime-safety cost, and will you be forced to "
+                "migration / API-break / infra / concurrency / runtime-safety cost, and will "
+                "you be forced to "
                 "invent decisions later? You are READ-ONLY: do not edit any file. You may block on "
                 "implementability/scope/testability but must not author or redesign the "
                 "architecture. Return your exact output format ending in a verdict "
@@ -604,16 +636,51 @@ class Engine:
         p.append(self._SCOPE_FENCE)
         return "\n\n".join(p)
 
-    def _review_prompt(self, task, diff, dev_summary, kind, arch_path=None):
+    # How much prior-gate history a re-review carries. Bounded so the reviewer prompt
+    # cannot grow without limit across a long run: only the LAST few blockers matter
+    # for deciding whether this iteration's diff actually fixed them.
+    _REVIEW_HISTORY_ENTRIES = 3
+    _REVIEW_HISTORY_CHARS = 12000
+
+    def _review_history_block(self, history):
+        """Render the blockers earlier gates raised in THIS run, newest last.
+
+        WHY (Irina 2026-08-09): the code reviewer used to get a fresh prompt with no
+        memory of what the Architect/Tech Lead had blocked on, so on iteration >= 2 it
+        re-reviewed a diff whose contentious part it had already passed and passed it
+        again — 32 of 33 re-reviews after an Architect NEEDS_FIX were PASS. Carrying the
+        prior blockers makes verifying the fix part of the review instead of a re-run.
+        """
+        if not history:
+            return ""
+        tail = history[-self._REVIEW_HISTORY_ENTRIES:]
+        body = "\n".join(tail)[-self._REVIEW_HISTORY_CHARS:]
+        return ("## Blockers raised earlier in THIS run (by any gate)\n"
+                "The developer was told to fix these. Part of your review is to confirm each one is "
+                "ACTUALLY fixed in the diff below — a blocker that was papered over, or 'fixed' in "
+                "the summary but not in the code, is itself a blocking issue. If a previous gate "
+                "blocked on something you had passed, treat that as a signal that your bar was too "
+                "low, not as a reason to defer.\n\n"
+                f"{body}\n\n")
+
+    def _review_prompt(self, task, diff, dev_summary, kind, arch_path=None, history=None):
         lens = ("as Code Reviewer (correctness, regressions, tests, security)"
                 if kind == "code" else
                 "as Architect (architecture impact, boundaries, ADR need)")
+        # Both reviewers get the approved architecture. The code reviewer used to be
+        # denied it, which made every "the diff does not do what the approved design
+        # mandates" defect structurally invisible to the FIRST gate and left it for the
+        # Architect (Irina 2026-08-09).
         arch_block = ""
-        if kind == "arch" and arch_path:
-            arch_block = (f"## Approved architecture (read at `{arch_path}`)\nJudge the diff "
-                          "against it — open the sections the change touches.\n\n")
+        if arch_path:
+            judge = ("Judge the diff against it — open the sections the change touches."
+                     if kind == "arch" else
+                     "Open the sections the change touches: a diff that does not implement what the "
+                     "approved design mandates is a BLOCKING issue for you, not only for the Architect.")
+            arch_block = f"## Approved architecture (read at `{arch_path}`)\n{judge}\n\n"
         return (f"## Task\n{task}\n\n## {self.ctx.repo_scope_line()}\n\n"
                 f"{arch_block}"
+                f"{self._review_history_block(history)}"
                 f"## Developer summary\n{dev_summary}\n\n"
                 f"## Implementation diff\n```diff\n{diff}\n```\n\n"
                 f"Review ONLY the diff above {lens}. The diff already contains exactly the repos in "
@@ -624,14 +691,33 @@ class Engine:
 
     def _techlead_prompt(self, task, diff, dev_summary, code_review, arch_review, arch_path=None):
         arch_block = f"## Approved architecture (read at `{arch_path}`)\n\n" if arch_path else ""
+        # Name the agent that actually wrote each review. Both headers said "(Codex)",
+        # which misattributed the Claude code review to the architect's vendor.
+        wf = self.ctx.workflows["development"]
+        wf_agents = (wf["code_reviewer"].get("agent") or "code reviewer",
+                     wf["architect"].get("agent") or "architect")
+        # With the code-review gate disabled, the Tech Lead is the ONLY reviewer after the
+        # Architect — say so, so it does not assume a peer code review already happened.
+        if code_review is None:
+            cr_block = ("## Code Reviewer review\n(The code-review gate is disabled for this run. "
+                        "No peer code review was performed — do not assume one. You are the last "
+                        "gate before human review, and the only one after the Architect.)\n\n")
+            closing = ("Review the Architect's review AND the diff itself per your Tech Lead role. "
+                       "Because no code review ran, implementation-level risk (correctness, "
+                       "regressions, concurrency, test strength) is yours to catch as well. "
+                       "Validate proportionality, confirm/downgrade blockers, catch missed risks, "
+                       "and return your verdict.")
+        else:
+            cr_block = f"## Code Reviewer ({wf_agents[0]}) review\n{code_review}\n\n"
+            closing = ("Review the reviews per your Tech Lead role. Validate proportionality, "
+                       "confirm/downgrade blockers, catch missed risks, and return your verdict.")
         return (f"## Task\n{task}\n\n## {self.ctx.repo_scope_line()}\n\n"
                 f"{arch_block}"
                 f"## Developer summary\n{dev_summary}\n\n"
                 f"## Implementation diff\n```diff\n{diff}\n```\n\n"
-                f"## Code Reviewer (Codex) review\n{code_review}\n\n"
-                f"## Architect (Codex) review\n{arch_review}\n\n"
-                "Review the reviews per your Tech Lead role. Validate proportionality, "
-                "confirm/downgrade blockers, catch missed risks, and return your verdict.")
+                f"{cr_block}"
+                f"## Architect ({wf_agents[1]}) review\n{arch_review}\n\n"
+                + closing)
 
     def _dev_arbiter_prompt(self, task, diff, dev_summary, disagreements):
         return (f"## Original task\n{task}\n\n## Current diff\n```diff\n{diff}\n```\n\n"
@@ -651,36 +737,77 @@ class Engine:
                 "cannot be decided at the architecture level, return ESCALATE_TO_TECH_LEAD. Return your "
                 "exact Architect verdict format.")
 
-    def _dev_staged_review(self, task, diff, dev_summary, phase, i, arch_path=None):
+    def _gate_enabled(self, cell) -> bool:
+        """Is this review cell wired in for this run? A cell with "enabled": false in
+        workflows.json is never invoked; the next stage becomes the first gate. The cell
+        stays in the roster block on purpose — dropping it from roster.cells would shift
+        the positional chain and silently reassign the cells after it."""
+        spec = self.ctx.workflows[self.workflow].get(cell)
+        return bool(isinstance(spec, dict) and spec.get("enabled", True))
+
+    def _reviewer_miss(self, gate, verdict, blocker, i, phase):
+        """Record that a LATER gate blocked on a diff the code reviewer had just passed.
+
+        The code reviewer is stage 1 of 3; when it passes and the Architect or Tech Lead
+        then blocks, that is a miss by the first gate — the defect was in the same diff it
+        just read. Nothing measured this before, which is why a reviewer that had stopped
+        blocking (2 % NEEDS_FIX in August vs a 63 % Architect block rate on the same diffs)
+        went unnoticed for weeks. Logged to events.jsonl so miss rate is queryable per run
+        and across runs; surfaced in the transcript so it is visible while the run is live.
+        """
+        self._miss_count = getattr(self, "_miss_count", 0) + 1
+        self.ctx.tx.event(kind="reviewer_miss", gate=gate, gate_verdict=verdict,
+                          iteration=i, phase=phase,
+                          code_reviewer=self.ctx.workflows["development"]["code_reviewer"].get("agent"),
+                          blocker=(blocker or "")[:2000])
+        self.ctx.tx.md(f"\n> ⚠ **reviewer miss** — `{gate}` returned {verdict} at iteration {i} "
+                       "on a diff the Code Reviewer had just PASSED.\n")
+
+    def _dev_staged_review(self, task, diff, dev_summary, phase, i, arch_path=None, history=None):
         """Staged review gate (Irina 2026-06-22): Code Review (the peer 'second developer') runs FIRST;
         only when it PASSES does the Architect review run; only when the Architect passes does the Tech
         Lead (final gate) run. A failing earlier stage short-circuits, so later reviewers never see code
-        an earlier gate already rejected. Returns (verdict, feedback, gate)."""
+        an earlier gate already rejected. Returns (verdict, feedback, gate).
+
+        `history` carries the blockers earlier gates raised in this run, so a re-review verifies
+        the fix instead of re-reading the diff blind. Every later-gate block after a code-review
+        PASS is logged as a reviewer_miss (Irina 2026-08-09)."""
         wf = self.ctx.workflows["development"]
-        # Stage 1 — Code Review (second developer).
-        cr, crv = self.call("dev.code_review", wf["code_reviewer"],
-                            self._review_prompt(task, diff, dev_summary, "code"),
-                            phase=phase, iteration=i)
-        if crv != "PASS":
-            return "DEVELOPER_NEEDS_FIX", (
-                f"## Code Reviewer verdict: {crv}\n{cr.text}\n\n"
-                "Fix these blocking issues; architecture review runs once code review passes."), "code-review"
-        # Stage 2 — Architect (only after code review passes).
+        # Stage 1 — Code Review (second developer). Skippable: a cell with
+        # "enabled": false is not invoked and the next stage becomes the first gate.
+        # Disabling here does NOT touch the roster, so the cell's agent stays reserved
+        # and the positional chain for architect/tech_lead/arbiter is unchanged.
+        cr_text = None
+        if self._gate_enabled("code_reviewer"):
+            cr, crv = self.call("dev.code_review", wf["code_reviewer"],
+                                self._review_prompt(task, diff, dev_summary, "code", arch_path, history),
+                                phase=phase, iteration=i)
+            if crv != "PASS":
+                return "DEVELOPER_NEEDS_FIX", (
+                    f"## Code Reviewer verdict: {crv}\n{cr.text}\n\n"
+                    "Fix these blocking issues; architecture review runs once code review passes."), "code-review"
+            cr_text = cr.text
+        # Stage 2 — Architect (first gate when code review is disabled).
         ar, arv = self.call("dev.architect", wf["architect"],
-                            self._review_prompt(task, diff, dev_summary, "arch", arch_path),
+                            self._review_prompt(task, diff, dev_summary, "arch", arch_path, history),
                             phase=phase, iteration=i)
         if arv not in ("PASS", "NOT_APPLICABLE", "ESCALATE_TO_TECH_LEAD"):
+            # Only a miss if a gate actually ran before this one and let the diff through.
+            if cr_text is not None:
+                self._reviewer_miss("architect", arv, ar.text, i, phase)
             return "DEVELOPER_NEEDS_FIX", (
                 f"## Architect verdict: {arv}\n{ar.text}\n\n"
                 "Fix these architecture blockers; the Tech Lead final review runs once the Architect passes."), "architect"
         # Stage 3 — Tech Lead (final gate, only after the Architect passes).
         tl, tlv = self.call("dev.tech_lead", wf["tech_lead"],
-                            self._techlead_prompt(task, diff, dev_summary, cr.text, ar.text, arch_path),
+                            self._techlead_prompt(task, diff, dev_summary, cr_text, ar.text, arch_path),
                             phase=phase, iteration=i)
         if tlv == READY:
             return READY, tl.text, "tech-lead"
         if tlv == "ESCALATE_TO_HUMAN" or tlv is None:
             return "ESCALATE_TO_HUMAN", tl.text, "tech-lead"
+        if cr_text is not None:
+            self._reviewer_miss("tech-lead", tlv, tl.text, i, phase)
         return "DEVELOPER_NEEDS_FIX", f"## Tech Lead verdict: {tlv}\n{tl.text}", "tech-lead"
 
     def _dev_break_deadlock(self, task, diff, dev_summary, disagreements, i):
@@ -711,6 +838,9 @@ class Engine:
 
         self._dev_repeat, self._dev_last_sig = 0, None
         instruction, disagreements, diff, dev_summary = None, [], "", ""
+        # Blockers raised by any gate so far, replayed to the reviewers on the next
+        # iteration so a re-review verifies the fix instead of re-reading blind.
+        review_history = []
 
         for i in range(1, maxit + 1):
             dresp, dverdict = self.call("dev.developer", developer,
@@ -731,12 +861,14 @@ class Engine:
                 continue
 
             # Staged review: code-review -> architect -> tech-lead.
-            verdict, feedback, gate = self._dev_staged_review(task, diff, dev_summary, "development", i, arch_path)
+            verdict, feedback, gate = self._dev_staged_review(task, diff, dev_summary, "development", i,
+                                                             arch_path, review_history)
             if verdict == READY:
                 return self._finish(READY, f"Tech Lead returned READY_FOR_HUMAN_REVIEW at iteration {i}.")
             if verdict == "ESCALATE_TO_HUMAN":
                 return self._finish(HUMAN_REQUIRED, f"Tech Lead escalated to human at iteration {i}.")
 
+            review_history.append(f"### Iteration {i} — blocked by {gate}\n{feedback}\n")
             instruction, stop = self._dev_handle_blocker(gate, feedback, task, diff, dev_summary, disagreements, i, trig)
             if stop:
                 return self._finish(HUMAN_REQUIRED, f"Arbiter stopped the run at iteration {i} (human decision needed).")
@@ -781,30 +913,33 @@ class Engine:
                 "Apply this guidance and continue the implementation."), False
 
     # ================= INVESTIGATION ==================================
-    # Investigator produces falsifiable hypotheses from the problem's named
-    # files/repos/logs/evidence. The Refuter attacks every cycle; only when it
-    # cannot break a hypothesis does the independent Verifier attack it from a
-    # fresh angle. The Arbiter is invoked only on escalation/deadlock. The
-    # Investigator is the ONLY role that may edit/build, and only in the
-    # configured writable repos; that scope is fenced by the prompt and surfaced
-    # to the skeptics via the captured debug diff.
+    # Investigator (Claude) reads all five repos on their named branches, reads
+    # the named servers' logs, and produces falsifiable hypotheses. The Refuter
+    # (Gemini) attacks every cycle; only when it cannot break a hypothesis does
+    # the independent Verifier (Codex) — the final gate — attack it from a fresh
+    # angle. The Arbiter is invoked only on escalation/deadlock. The
+    # Investigator is the ONLY role that may edit/build, and only in the writable
+    # repos; that scope is fenced by the prompt and surfaced to the skeptics via
+    # the captured debug diff (a read-only-repo change is a disqualifying edit).
     _INV_FINAL_ARTIFACT = "root-cause-final.md"
     _INV_SCOPE_FENCE = (
         "## Investigation scope discipline (mandatory)\n"
-        "- Read and analyse the files/repos/logs/evidence named in the problem; presume no "
-        "component innocent until evidence clears it, including contract mismatches between components.\n"
-        "- You may EDIT and BUILD only in the configured WRITABLE repos, and only as temporary, "
-        "clearly-marked debug instrumentation to confirm or kill a hypothesis. Never edit a "
-        "read-only repo, not even 'to test'.\n"
-        "- Your deliverable is a proven, falsifiable hypothesis, not a shipped fix and not a "
-        "timing workaround that papers over the mechanism.\n"
-        "- Every hypothesis needs a complete cited chain: symptom/evidence -> file/path:line or "
-        "contract clause -> mechanism -> falsifier, plus a guilty/cleared verdict for each "
-        "component in scope."
+        "- Read and analyse ALL five repos on the branches named in the problem; presume NO "
+        "project innocent and excuse none — including a contract mismatch BETWEEN repos.\n"
+        "- You may EDIT and BUILD only in the WRITABLE repos, "
+        "and only as temporary, clearly-marked debug instrumentation to confirm or kill a "
+        "hypothesis. Never edit a read-only repo, not even "
+        "'to test' — any such change is a disqualifying scope violation.\n"
+        "- Your deliverable is a PROVEN, falsifiable hypothesis, not a shipped fix and not a "
+        "timing workaround (no sleep/After=/PartOf=/retry to paper over a race — name the "
+        "code-level race: threads/lcores, shared state, missing lock or ordering).\n"
+        "- Every hypothesis needs a complete cited chain (symptom log → repo/path:line on the "
+        "stated branch → mechanism → falsifier) and a per-repo guilty/cleared verdict."
     )
 
     def _inv_investigator_prompt(self, task, instruction, arbitration=False):
-        p = [f"## Problem description (names the affected scope and available evidence)\n{task}",
+        p = [f"## Problem description (names the affected repos, their branches, and the "
+             f"hosts/servers — NOT the log paths, which you derive from the repos)\n{task}",
              self.ctx.repo_scope_prompt()]
         if instruction:
             label = ("Arbiter ruling — act on the smallest evidence-gathering step it names"
@@ -813,9 +948,11 @@ class Engine:
                      "or DROP the broken hypothesis and propose a better one")
             p.append(f"## {label}\n{instruction}")
         else:
-            p.append("Verify the relevant source/context before reasoning; read the named logs, "
-                     "tests, traces, transcripts, contracts, or code paths; correlate observations "
-                     "with implementation or contract locations; then produce ranked, falsifiable "
+            p.append("Verify each repo is on its named branch; derive each service's log "
+                     "location / journald unit from the repos themselves (service unit files, "
+                     "logging/ConfD config, code, devtools collectors) — the problem gives you "
+                     "the hosts, not the paths; then read those logs on the named hosts, "
+                     "correlate them with the code, and produce your ranked, falsifiable "
                      "root-cause hypotheses.")
         p.append(self._INV_SCOPE_FENCE)
         return "\n\n".join(p)
@@ -823,15 +960,19 @@ class Engine:
     def _inv_refuter_prompt(self, task, hypothesis, debug_diff, is_no_defect=False):
         if is_no_defect:
             task_line = (
-                "The Investigator concluded **NO_DEFECT_FOUND** for the configured writable scope. "
-                "Your job is to REFUTE that conclusion: prove a defect DOES exist in scope, or that "
-                "it was cleared on inadequate evidence. REFUTED = you found such a gap. NOT_REFUTED = "
-                "you genuinely tried and the no-defect conclusion stands. Return REFUTED / "
-                "NOT_REFUTED / INSUFFICIENT_EVIDENCE.")
+                "The Investigator concluded **NO_DEFECT_FOUND** — that the writable repos "
+                "contain no defect and the cause is upstream / "
+                "out of scope. Your job is to REFUTE that conclusion: prove a defect DOES exist in "
+                "a writable repo, or that it was CLEARED on inadequate evidence — e.g. a cumulative "
+                "counter read as a single snapshot instead of a delta over the symptom window, a "
+                "drop/branch never instrumented, an upstream cause asserted without a time-correlated "
+                "delta, or a writable repo exonerated by 'looks right'. REFUTED = you found such a "
+                "gap (the no-defect does NOT hold). NOT_REFUTED = you genuinely tried and the "
+                "no-defect conclusion stands. Return REFUTED / NOT_REFUTED / INSUFFICIENT_EVIDENCE.")
         else:
             task_line = (
-                "Attack every hypothesis per your role. Re-verify each cited file/path:line or "
-                "contract clause and re-check scope/blame bias. "
+                "Attack every hypothesis per your role. Re-verify each cited repo/path:line on the "
+                "stated branch and re-check both biases (home-team excuse / read-only scapegoat). "
                 "Flag any edit to a read-only repo as a disqualifying scope violation. Return your "
                 "exact output format ending in REFUTED / NOT_REFUTED / INSUFFICIENT_EVIDENCE.")
         header = ("Investigator's NO-DEFECT conclusion to refute" if is_no_defect

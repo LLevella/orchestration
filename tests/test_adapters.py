@@ -10,7 +10,10 @@ import unittest
 from orchestrator.config import load_config
 from orchestrator.adapters import build_adapters, CliAdapter, ApiAdapter, MockAdapter
 
-CLI_AGENTS = ("claude", "codex", "gemini")
+# Which agent uses which adapter is a CONFIG decision (transport / api_base), not a
+# fact about vendor names: gemini moved cli -> api on 2026-08-03 when its CLI began
+# ignoring the -m pin. Deriving both sets from the config keeps this test about the
+# dispatch rule instead of re-encoding one snapshot of the roster.
 
 
 class TestBuildAdapters(unittest.TestCase):
@@ -27,11 +30,14 @@ class TestBuildAdapters(unittest.TestCase):
 
     def test_real_dispatch_cli_vs_api(self):
         ad = build_adapters(self.agents_cfg, mock=False, scenario=None, cwd=None)
-        for n in CLI_AGENTS:
+        agents = self.agents_cfg["agents"]
+        api_agents = [n for n in self.names if "api_base" in agents[n]]
+        cli_agents = [n for n in self.names if "api_base" not in agents[n]]
+        # Both kinds must exist, or this test would pass vacuously on a broken config.
+        self.assertTrue(api_agents, "expected at least one api_base agent")
+        self.assertTrue(cli_agents, "expected at least one cli agent")
+        for n in cli_agents:
             self.assertIsInstance(ad[n], CliAdapter, n)
-        # the 4th agent (arbiter; api_base present) -> ApiAdapter, regardless of model.
-        api_agents = [n for n in self.names if "api_base" in self.agents_cfg["agents"][n]]
-        self.assertTrue(api_agents, "expected at least one api_base agent (the arbiter)")
         for n in api_agents:
             self.assertIsInstance(ad[n], ApiAdapter, n)
 

@@ -5,9 +5,8 @@ read-only step we snapshot the working tree of every watched repo (the writable
 `dev_repos` and the read-only `analysis_repos`) and assert nothing changed. A
 change under a read-only agent aborts the run.
 
-The workspace root that holds the orchestration/ tool may be a single repo or a
-container for several project repos, so the guard watches a configured *list* of
-repos.
+The workspace root that holds the orchestration/ tool is itself not a git repo;
+each project under it is a separate repo, so the guard watches a *list* of repos.
 
 The snapshot is a hash over, for each repo: filtered `git status --porcelain` +
 `git diff` + `git diff --cached` (each excluding the tool dir). This catches not
@@ -20,6 +19,8 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+
+from orchestrator.config import git_clean_env
 
 
 class GuardViolation(Exception):
@@ -48,8 +49,11 @@ class GitGuard:
         self.available = bool(self.repos) and not self.invalid
 
     def _git(self, repo, *args):
+        # Scrubbed env: an inherited GIT_DIR/GIT_INDEX_FILE would silently retarget
+        # this call at another repository's gitdir and at a commit-in-progress index
+        # (see orchestrator/config.py::git_clean_env for the incident).
         return subprocess.run(["git", "-C", repo, *args],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=git_clean_env())
 
     def _is_repo(self, repo) -> bool:
         r = self._git(repo, "rev-parse", "--is-inside-work-tree")
@@ -87,4 +91,43 @@ class GitGuard:
             raise GuardViolation(
                 f"Read-only agent '{who}' altered the working tree during step "
                 f"'{step}'. Only the Developer may edit production code. Delta: {detail}"
+            )
+
+    def branches(self):
+        """Return {label: current branch} across all repos, or None if inactive.
+
+        Checked around EVERY step, including the Developer's editable one, because
+        switching branches mutates no file and is therefore invisible to
+        snapshot()/assert_unchanged(). Observed 2026-08-01: a Developer agent ran
+        `git checkout` 70 s into a run despite an explicit prohibition in its task,
+        and the whole change silently landed on an unrelated branch — the diff looked
+        perfect and the wrong base was only found in review.
+        """
+        if not self.active:
+            return None
+        out = {}
+        for label, repo in self.valid:
+            r = self._git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+            out[label] = r.stdout.strip() if r.returncode == 0 else None
+        return out
+
+    def assert_branch_unchanged(self, before, after, who: str, step: str):
+        """Abort if any watched repo changed its checked-out branch during a step.
+
+        Applies to every role. A detached HEAD or an unreadable branch reads as None
+        and is ignored rather than treated as a move, so this cannot fire spuriously
+        on a repo the guard could not interrogate.
+        """
+        if not before or not after:
+            return
+        moved = [(label, before[label], after.get(label))
+                 for label in before
+                 if before.get(label) and after.get(label)
+                 and before[label] != after[label]]
+        if moved:
+            detail = "; ".join(f"{label}: {b} -> {a}" for label, b, a in moved)
+            raise GuardViolation(
+                f"Agent '{who}' changed the checked-out branch during step '{step}' "
+                f"({detail}). Branch switching is prohibited for every role: the "
+                f"run's work lands on the wrong base and the diff does not show it."
             )

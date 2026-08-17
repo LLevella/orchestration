@@ -185,8 +185,9 @@ def _print_chain(wf: str, wf_cfg: dict, agents: dict):
     for i, (key, spec) in enumerate(_workflow_steps(wf_cfg), 1):
         cfg = agents.get(spec["agent"], {})
         edit = "✎" if cfg.get("can_edit") else " "
+        off = "" if spec.get("enabled", True) else "   ⏻ DISABLED — this step is skipped"
         print(f"    {i}. {key:18s} {edit} {spec['agent']:8s} "
-              f"({_agent_model(cfg)})  →  {spec['role']}")
+              f"({_agent_model(cfg)})  →  {spec['role']}{off}")
         note = _seat_note(key, cfg.get("can_edit", False))
         if note:
             print(f"       └─ {note}")
@@ -245,16 +246,8 @@ def cmd_doctor(args):
         print(f"  {wf:13s}: {names}")
 
     print("\nReady for --mock runs: YES (no credentials required).")
-    if any_missing:
-        real_msg = "NO - install/configure the MISSING agents above."
-    elif not guard.active:
-        real_msg = (
-            "NO - git guard is inactive; make the configured dev_repos valid git "
-            "worktrees or pass --allow-unguarded intentionally."
-        )
-    else:
-        real_msg = "YES."
-    print("Ready for real runs  :", real_msg)
+    print("Ready for real runs  :",
+          "NO - install/configure the MISSING agents above." if any_missing else "YES.")
 
 
 def _run(workflow, args):
@@ -338,6 +331,99 @@ def cmd_show(args):
     print(f"transcript : {d / 'transcript.md'}")
     print(f"events     : {d / 'events.jsonl'}")
     print(f"artifacts  : {d / 'artifacts'}")
+
+
+_DEV_GATES = ("dev.code_review", "dev.architect", "dev.tech_lead")
+# Verdicts that let a diff through each gate; anything else is a block.
+_GATE_PASS = {"dev.code_review": {"PASS"},
+              "dev.architect": {"PASS", "NOT_APPLICABLE", "ESCALATE_TO_TECH_LEAD"},
+              "dev.tech_lead": {"READY_FOR_HUMAN_REVIEW", "ESCALATE_TO_HUMAN"}}
+
+
+def _is_mock_run(run_dir: Path) -> bool:
+    """Mock runs replay scripted fixture verdicts, so their gate outcomes say nothing
+    about gate quality — they must never move the miss rate."""
+    meta = run_dir / "run.json"
+    if not meta.exists():
+        return False
+    try:
+        return bool(json.loads(meta.read_text(encoding="utf-8")).get("mock"))
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def _dev_run_gate_rows(run_dir: Path):
+    """(iteration -> {step: verdict}) for one development run, from its journal."""
+    ev = run_dir / "events.jsonl"
+    if not ev.exists():
+        return {}
+    out = {}
+    for line in ev.read_text(encoding="utf-8").splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("kind") == "step" and e.get("step") in _DEV_GATES:
+            out.setdefault(e["iteration"], {})[e["step"]] = e.get("verdict")
+    return out
+
+
+def cmd_gates(args):
+    """Cross-run gate quality: per-gate block rate and the Code-Reviewer miss rate.
+
+    A "miss" is an iteration where the Code Reviewer PASSED and a LATER gate then blocked
+    the same diff. Reconstructed from the step journal, so it works on runs recorded before
+    the reviewer_miss event existed — which is the whole point: this is the query that would
+    have surfaced, weeks earlier, a first gate that had quietly stopped blocking.
+    """
+    runs = sorted(p for p in RUNS_DIR.glob("*-development-*")
+                  if p.is_dir() and not _is_mock_run(p)) if RUNS_DIR.exists() else []
+    if args.since:
+        runs = [r for r in runs if r.name[:len(args.since)] >= args.since]
+    if args.last:
+        runs = runs[-args.last:]
+    if not runs:
+        print("no development runs matched.")
+        return
+    seen = {g: {"n": 0, "blocked": 0} for g in _DEV_GATES}
+    misses, iterations, per_run = 0, 0, []
+    for r in runs:
+        rows = _dev_run_gate_rows(r)
+        run_miss = 0
+        for _it, row in sorted(rows.items()):
+            for g in _DEV_GATES:
+                if g not in row:
+                    continue
+                seen[g]["n"] += 1
+                if row[g] not in _GATE_PASS[g]:
+                    seen[g]["blocked"] += 1
+            if row.get("dev.code_review") != "PASS":
+                continue
+            iterations += 1
+            if any(g in row and row[g] not in _GATE_PASS[g]
+                   for g in ("dev.architect", "dev.tech_lead")):
+                misses += 1
+                run_miss += 1
+        if run_miss:
+            per_run.append((r.name, run_miss))
+    print(f"== gate quality over {len(runs)} development runs "
+          f"({runs[0].name[:8]}..{runs[-1].name[:8]}) ==\n")
+    print(f"{'gate':<18} {'ran':>5} {'blocked':>8} {'block rate':>11}")
+    for g in _DEV_GATES:
+        s = seen[g]
+        rate = f"{100 * s['blocked'] / s['n']:.0f}%" if s["n"] else "n/a"
+        print(f"{g:<18} {s['n']:>5} {s['blocked']:>8} {rate:>11}")
+    if not seen["dev.code_review"]["n"]:
+        print("\nCode-Reviewer misses: n/a — the code-review gate did not run in this window "
+              "(see development.code_reviewer.enabled in config/workflows.json).")
+    else:
+        rate = f"{100 * misses / iterations:.0f}%" if iterations else "n/a"
+        print(f"\nCode-Reviewer misses: {misses} of {iterations} passed iterations ({rate}) "
+              "— a later gate blocked a diff the Code Reviewer had passed.")
+    if per_run:
+        print("\nruns with misses:")
+        for name, n in per_run[-args.top:]:
+            print(f"  {name}  {n}")
 
 
 _OUTPUT_MARKER = "## Agent Output\n\n"
@@ -447,6 +533,11 @@ def main():
     sps = sub.add_parser("show", help="print a run's status and transcript location")
     sps.add_argument("run_id")
 
+    spg = sub.add_parser("gates", help="gate block rates + Code-Reviewer miss rate across dev runs")
+    spg.add_argument("--since", help="only runs whose id starts at/after this prefix, e.g. 20260801")
+    spg.add_argument("--last", type=int, help="only the N most recent development runs")
+    spg.add_argument("--top", type=int, default=10, help="how many missing runs to list (default 10)")
+
     args = p.parse_args()
     try:
         if args.cmd == "doctor":
@@ -463,6 +554,8 @@ def main():
             sys.exit(cmd_resume(args))
         elif args.cmd == "show":
             cmd_show(args)
+        elif args.cmd == "gates":
+            cmd_gates(args)
     except ConfigError as e:
         sys.exit(f"config error: {e}")
 
