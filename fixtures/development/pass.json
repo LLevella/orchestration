@@ -1,0 +1,19 @@
+{
+  "name": "pass",
+  "_comment": "Happy path: Claude implements, Codex code-review PASS, Codex architect NOT_APPLICABLE, Gemini Tech Lead READY_FOR_HUMAN_REVIEW. Converges at iteration 1.",
+  "responses": {
+    "dev.developer": [
+      "## Developer Verdict\nREADY_FOR_ARCHITECT_REVIEW\n\n## Implementation Summary\n- Implemented the mock task with a focused change.\n\n## Files Changed\n- (mock) src/mock.rs\n\n## Tests / Validation\n- Command: scripts/ci-local\n- Result: pass (mock)\n\n## Architecture Impact\nNone\n"
+    ],
+    "dev.code_review": [
+      "### Code Review Verdict\n\nPASS\n\n### Summary\n- Change is minimal and correct.\n\n### Tests Assessment\n- Tests reviewed: yes; Test risk level: Low\n\n### Contract / Regression Risk\n- Regression risk: Low\n"
+    ],
+    "dev.architect": [
+      "## Architect Verdict\nNOT_APPLICABLE\n\n## Review Scope\nLOCAL\n\n## Architecture Summary\n- Purely local implementation detail; no architecture impact.\n\n## ADR Needed\nNo\n"
+    ],
+    "dev.tech_lead": [
+      "## Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\n## Review of Architect\n- Proportional review: Yes\n- Missed serious risks: No\n\n## Human Review Notes\n- Straightforward change; safe for human review.\n"
+    ]
+  },
+  "default": {}
+}

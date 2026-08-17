@@ -1,0 +1,16 @@
+# Run history is process output, not source. Never committed.
+runs/
+__pycache__/
+*.pyc
+
+# Secrets — never committed
+deepseek.env
+gemini.env
+*.env
+
+# Scratch: per-run task briefs and logs
+tmp/
+
+# Model/CLI caches
+*cache*.json
+models_cache.json

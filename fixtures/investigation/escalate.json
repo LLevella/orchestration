@@ -1,0 +1,13 @@
+{
+  "name": "escalate",
+  "_comment": "Deadlock: the Refuter refutes the same weak chain every cycle. Arbitration returns NEEDS_HUMAN_DECISION.",
+  "responses": {
+    "inv.arbiter": [
+      "## Arbitration Verdict\nNEEDS_HUMAN_DECISION\n\n## Dispute Summary\n- Investigator says the booking handoff duplicated a draft, but the trace lacks idempotency-key evidence.\n\n## Minimal Next Action\n- Human must provide or authorize access to booking idempotency logs for the affected correlation id.\n\n## Note for Human\n- The chain cannot be closed without the authoritative booking-side log.\n"
+    ]
+  },
+  "default": {
+    "inv.investigator": "## Investigator Verdict\nHYPOTHESIS_READY_FOR_REFUTATION\n\n## Hypotheses\n### H1 - duplicate draft from repeated handoff (Confidence: Low)\n- Mechanism: unproven.\n- Falsifier: same Idempotency-Key returned the original booking_draft_id.\n",
+    "inv.refuter": "## Refutation Verdict\nREFUTED\n\n## Where It Failed\n- No idempotency-key or booking_draft_id evidence is cited. Same break as previous cycle: the mechanism is still unproven.\n"
+  }
+}

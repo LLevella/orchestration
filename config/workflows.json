@@ -1,0 +1,163 @@
+{
+  "_comment": "Workflow control parameters for the Millennium copy. The orchestrator is a DEVELOPMENT TOOL for architecture/dev/review/investigation loops; it is not the runtime foundation of the travel agent product. Config is authoritative for agent<->role binding and limits; the engine owns control flow. Paths are resolved relative to the orchestration/ directory.",
+  "paths": {
+    "_comment": "repo_root is the Millennium workspace root and the cwd every agent CLI is launched in. dev_repos are development targets the Developer MAY edit; analysis_repos are read-only context. The current workspace root is not yet a git repo, so real runs require either making the target a git repo or passing --allow-unguarded knowingly. Mock runs always work.",
+    "repo_root": "..",
+    "roles_dir": "roles",
+    "docs_architecture": "docs/architecture",
+    "dev_repos": [
+      "projects/weyro-ai"
+    ],
+    "analysis_repos": []
+  },
+  "guard": {
+    "_comment": "exclude_prefix is applied within each watched repo; the orchestration/ tool dir lives at the workspace root (outside every watched repo), so its run output never appears in any repo's status.",
+    "enabled": true,
+    "exclude_prefix": "orchestration"
+  },
+  "validation": {
+    "_comment": "RESERVED / NOT YET ENFORCED. The orchestrator itself never executes build/test commands; the Developer (Claude) agent runs them inside its own sandbox during its step. These fields document intended policy and are read by no code today: reviewers stay pure-analysis. Wiring orchestrator-side command execution is deliberately out of scope for the conservative first cut.",
+    "developer_commands": [
+      "scripts/ci-local"
+    ],
+    "allow_reviewer_commands": false,
+    "allowed_readonly_commands": []
+  },
+  "architecture": {
+    "_comment": "Developer-centric chain, two escalation tiers. Codex (System Architect) AUTHORS the proposal; the MAX-EFFORT Claude Developer Verifier is the PRIMARY reviewer — the developer who will build it does the developer review of every draft (FEASIBLE/NEEDS_REVISION/HUMAN_REQUIRED) and FEASIBLE is required but NOT sufficient: after the Developer returns FEASIBLE the Tech Lead runs a MANDATORY control review and its READY_FOR_HUMAN_REVIEW is the PASS (a control rejection sends the Architect back to revise + the Developer to re-verify). An Architect<->Developer deadlock (never FEASIBLE) routes to Tech-Lead arbitration (tier 1); a Tech-Lead control/arbitration deadlock or ESCALATE routes to the Arbiter (tier 2). No standalone code-review gate. (Tech-Lead control gate added 2026-06-19, Irina.) Agents are resolved by `roster` at run start (the per-cell `agent` below is the all-live default and is overwritten by the roster). (Restructured 2026-06-15; roster 2026-06-15.)",
+    "max_iterations": 10,
+    "arbitration": {
+      "max_iterations": 10,
+      "trigger_after_cycles": 2
+    },
+    "roster": {
+      "_comment": "Approved chain (Irina 2026-06-15): codex · opus(pinned dev, max-effort) · gemini · deepseek · sonnet · haiku. developer_verifier is PINNED to claude_reviewer — the shift-left jumps OVER it so the developer review is ALWAYS a real Claude developer, never displaced to another vendor (if opus itself exhausts the pin falls back to claude_sonnet→claude_haiku, still Claude). Non-pinned cells (author, tech_lead, arbiter) fill positionally from the live chain. With codex disabled: author=gemini, dev_verifier=claude_reviewer, tech_lead=deepseek, arbiter=claude_sonnet.",
+      "chain": [
+        "codex",
+        "claude_reviewer",
+        "deepseek",
+        "gemini",
+        "claude_sonnet",
+        "claude_haiku"
+      ],
+      "cells": [
+        "author",
+        "developer_verifier",
+        "tech_lead",
+        "arbiter"
+      ],
+      "pinned": {
+        "developer_verifier": "claude_reviewer"
+      }
+    },
+    "author": {
+      "agent": "codex",
+      "role": "System Architect",
+      "wrapper": "architecture_author.md"
+    },
+    "developer_verifier": {
+      "agent": "claude_reviewer",
+      "role": "Developer Verifier"
+    },
+    "tech_lead": {
+      "agent": "gemini",
+      "role": "Technical Lead"
+    },
+    "arbiter": {
+      "agent": "deepseek",
+      "role": "Arbitration Reviewer"
+    },
+    "default_mock_scenario": "pass"
+  },
+  "development": {
+    "_comment": "Claude (Responsible Developer) implements; CODE review is by a MAX-EFFORT Claude too (Software Engineering Code Reviewer, ultrathink) — developers peer-review each other's code, as in real life, and the reviewer runs at max thinking budget to offset the shared-blind-spot risk of same-model review. Codex does the ARCHITECTURE review (System Architect). STAGED gate (Irina 2026-06-22): code-review runs FIRST; only when it PASSES does the Architect review; only when the Architect passes does the Tech Lead (final gate) run. An architecture question raised mid-implementation is answered by the ARCHITECT, not the arbiter; the Arbiter is called ONLY to break a genuine deadlock (the same blocker repeats > trigger_after_cycles). Agents resolved by `roster` at run start. (staged gate + arbiter-on-deadlock 2026-06-22; roster 2026-06-15.)",
+    "max_iterations": 10,
+    "arbitration": {
+      "max_iterations": 10,
+      "trigger_after_cycles": 2
+    },
+    "roster": {
+      "_comment": "Approved chain (Irina 2026-06-15): opus · opus(max-effort reviewer) · codex · gemini · deepseek · sonnet · haiku. cell[i]=chain[i] when all live; an unavailable/disabled/EXHAUSTED agent shifts the chain left. With codex disabled: developer=claude, code_reviewer=claude_reviewer, architect=gemini, tech_lead=deepseek, arbiter=claude_sonnet.",
+      "chain": [
+        "claude",
+        "claude_reviewer",
+        "codex",
+        "deepseek",
+        "gemini",
+        "claude_sonnet",
+        "claude_haiku"
+      ],
+      "cells": [
+        "developer",
+        "code_reviewer",
+        "architect",
+        "tech_lead",
+        "arbiter"
+      ]
+    },
+    "developer": {
+      "agent": "claude",
+      "role": "Responsible Developer"
+    },
+    "code_reviewer": {
+      "agent": "claude_reviewer",
+      "role": "Software Engineering Code Reviewer"
+    },
+    "architect": {
+      "agent": "codex",
+      "role": "System Architect"
+    },
+    "tech_lead": {
+      "agent": "gemini",
+      "role": "Technical Lead"
+    },
+    "arbiter": {
+      "agent": "deepseek",
+      "role": "Arbitration Reviewer"
+    },
+    "default_mock_scenario": "pass"
+  },
+  "investigation": {
+    "_comment": "Root-cause investigation loop. Investigator (Claude/Opus) reads the task-named files/repos/logs/contracts, correlates evidence, and proposes falsifiable hypotheses; it is the ONLY role that may edit/build, and only in dev_repos. Refuter attacks every cycle until it cannot break a hypothesis; the independent Verifier is then the final gate, attacking from a fresh angle; the Arbiter is invoked only on escalation/deadlock. Agents resolved by `roster` at run start. Ends ROOT_CAUSE_ESTABLISHED / NO_DEFECT_FOUND (success) or HUMAN_REQUIRED.",
+    "max_iterations": 5,
+    "_max_iterations_note": "Lowered 10->5 on 2026-06-16: a round-9 run thrashed for 6+ iterations (investigator kept re-deriving, refuter kept refuting) without converging. A focused, code-anchored task should converge in 2-3; 5 is a guardrail against burning hours + DeepSeek balance on non-convergence.",
+    "arbitration": {
+      "max_iterations": 10,
+      "trigger_after_cycles": 2
+    },
+    "roster": {
+      "_comment": "Approved chain (Irina 2026-06-15): opus · codex · gemini · deepseek · sonnet · haiku. cell[i]=chain[i] when all live; an unavailable/disabled/EXHAUSTED agent shifts the chain left. The judge (arbiter) is filled positionally, NOT reserved from the strong end. With codex disabled: investigator=claude(opus), refuter=gemini, verifier=deepseek, arbiter=claude_sonnet.",
+      "chain": [
+        "claude",
+        "codex",
+        "deepseek",
+        "gemini",
+        "claude_sonnet",
+        "claude_haiku"
+      ],
+      "cells": [
+        "investigator",
+        "refuter",
+        "verifier",
+        "arbiter"
+      ]
+    },
+    "investigator": {
+      "agent": "claude",
+      "role": "Root Cause Investigator"
+    },
+    "refuter": {
+      "agent": "codex",
+      "role": "Hypothesis Refuter"
+    },
+    "verifier": {
+      "agent": "gemini",
+      "role": "Adversarial Verifier"
+    },
+    "arbiter": {
+      "agent": "deepseek",
+      "role": "Investigation Arbiter"
+    },
+    "default_mock_scenario": "pass"
+  }
+}

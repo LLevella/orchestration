@@ -1,0 +1,15 @@
+{
+  "name": "escalate",
+  "_comment": "Tech Lead repeats DEVELOPER_NEEDS_FIX every cycle. After >2 repeats arbitration fires; DeepSeek returns NEEDS_HUMAN_DECISION -> HUMAN_REQUIRED.",
+  "responses": {
+    "dev.arbiter": [
+      "### Arbitration Verdict\n\nNEEDS_HUMAN_DECISION\n\n### Dispute Summary\n- Tech Lead keeps requiring a broad refactor; Developer says it is out of scope.\n\n### Final Note for Human\n- Scope/ownership question for Irina to decide.\n"
+    ]
+  },
+  "default": {
+    "dev.developer": "## Developer Verdict\nREADY_FOR_ARCHITECT_REVIEW\n\n## Implementation Summary\n- Applied the requested in-scope change only.\n\n## Architecture Impact\nNone\n",
+    "dev.code_review": "### Code Review Verdict\n\nNEEDS_FIX\n\n### Blocking Issues\n- Error path not covered by tests.\n",
+    "dev.architect": "## Architect Verdict\nPASS\n\n## Review Scope\nLOCAL\n",
+    "dev.tech_lead": "## Tech Lead Verdict\nDEVELOPER_NEEDS_FIX\n\n## Final Instructions\n### For Developer\n- Refactor the whole module for testability.\n"
+  }
+}

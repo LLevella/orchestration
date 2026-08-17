@@ -1,0 +1,21 @@
+{
+  "name": "archq",
+  "_comment": "Developer raises BLOCKED_BY_ARCHITECTURE_QUESTION on iteration 1 -> the ARCHITECT (not the arbiter) answers it; the developer applies the guidance and proceeds; the staged review (code-review -> architect -> tech-lead) then PASSes. Verifies architecture questions are resolved by the Architect, and the Arbiter is NOT invoked when there is no deadlock.",
+  "responses": {
+    "dev.developer": [
+      "## Developer Verdict\nBLOCKED_BY_ARCHITECTURE_QUESTION\n\n## Questions for Architect\n- Which of two existing boundaries should the new seam attach to?\n",
+      "## Developer Verdict\nREADY_FOR_ARCHITECT_REVIEW\n\n## Implementation Summary\n- Applied the architect's guidance; minimal, focused change.\n"
+    ],
+    "dev.architect": [
+      "## Architect Verdict\nNOT_APPLICABLE\n\n## Answer\n- Attach to boundary A; it stays within the approved architecture and the task scope. Minimal next step: wire the seam to A and continue.\n",
+      "## Architect Verdict\nPASS\n\n## Architecture Review\n- The change matches the approved architecture; boundaries respected.\n"
+    ],
+    "dev.code_review": [
+      "## Code Review Verdict\nPASS\n"
+    ],
+    "dev.tech_lead": [
+      "## Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n"
+    ]
+  },
+  "default": {}
+}

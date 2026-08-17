@@ -1,0 +1,18 @@
+{
+  "name": "pass",
+  "_comment": "Happy path: Investigator proposes a hypothesis; Refuter refutes it once; Investigator sharpens it; Refuter cannot break it; Verifier confirms. Converges at iteration 2.",
+  "responses": {
+    "inv.investigator": [
+      "## Investigator Verdict\nHYPOTHESIS_READY_FOR_REFUTATION\n\n## Problem Restatement\n- Symptom: (mock) recommendation card sometimes shows a price that is not present in the backend fixture.\n\n## Evidence\n- Trace: response renderer used free-form model prose before template binding.\n- Contract: api-spec-backend.md requires facts to come from structured backend data.\n\n## Hypotheses\n### H1 - renderer fallback allowed ungrounded numeric prose (Confidence: Medium)\n- Mechanism: missing price field caused the renderer to pass model-generated text through unchanged.\n- Falsifier: renderer rejects prose containing numbers when no structured price exists.\n",
+      "## Investigator Verdict\nHYPOTHESIS_READY_FOR_REFUTATION\n\n## Problem Restatement\n- Symptom: (mock) recommendation card sometimes shows a price that is not present in the backend fixture.\n\n## Evidence\n- File: renderer/mock.py:42 allows fallback prose to bypass the fact-card template.\n- Contract: api-spec-backend.md requires price facts to be template-bound from API fields.\n\n## Hypotheses\n### H1 - ungrounded numeric fallback at renderer/mock.py:42 (Confidence: High)\n- Mechanism: when price is null, fallback prose is still emitted; the model can include a number.\n- Falsifier: a test with price=null and numeric prose is rejected before user output.\n"
+    ],
+    "inv.refuter": [
+      "## Refutation Verdict\nREFUTED\n\n## Where It Failed\n- The first hypothesis lacks a concrete file/path:line and cannot prove where fallback prose bypasses validation.\n",
+      "## Refutation Verdict\nNOT_REFUTED\n\n## Attacks Attempted\n- Checked the cited line and the contract invariant; the bypass and falsifier now match.\n- Alternative cause: backend fixture itself containing the price is ruled out by the null fixture.\n"
+    ],
+    "inv.verifier": [
+      "## Verification Verdict\nCONFIRMED\n\n## Independent Check\n- Reconstructed the chain from fixture -> renderer -> user output; the ungrounded numeric path holds.\n\n## New Attacks Tried\n- Tested whether validation catches numeric text when price is null; the missing validation is the defect.\n"
+    ]
+  },
+  "default": {}
+}

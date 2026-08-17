@@ -1,0 +1,19 @@
+{
+  "name": "arbitrate_stands",
+  "_comment": "Verifier-escalation path: Refuter cannot break the hypothesis, Verifier asks for arbitration, Arbiter rules HYPOTHESIS_STANDS.",
+  "responses": {
+    "inv.investigator": [
+      "## Investigator Verdict\nHYPOTHESIS_READY_FOR_REFUTATION\n\n## Hypotheses\n### H1 - contract mismatch between policy resolution and adjudication context (Confidence: High)\n- Evidence: adjudicate was called with a resolution_id created for MOW->LED, while the offer is LED->MOW.\n- Contract: api-spec-backend.md requires context_mismatch and forbids handoff on a foreign context.\n- Mechanism: stale directional context reached adjudicate after the user changed route direction.\n- Falsifier: adjudicate receives a newly resolved LED->MOW resolution_id.\n"
+    ],
+    "inv.refuter": [
+      "## Refutation Verdict\nNOT_REFUTED\n\n## Attacks Attempted\n- Break-the-chain: direction mismatch and contract requirement hold.\n- Alternative cause: stale offer alone does not explain the directional mismatch.\n"
+    ],
+    "inv.verifier": [
+      "## Verification Verdict\nNEEDS_ARBITRATION\n\n## Independent Check\n- Chain matches, but whether the right terminal state is re-resolve or ask-user-again needs arbitration.\n"
+    ],
+    "inv.arbiter": [
+      "## Arbitration Verdict\nHYPOTHESIS_STANDS\n\n## Decision\n- The mismatch hypothesis stands. Minimal next step: re-resolve policy for the new route direction, then re-adjudicate; ask the user again only if verdict or price changes.\n"
+    ]
+  },
+  "default": {}
+}

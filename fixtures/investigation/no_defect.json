@@ -1,0 +1,16 @@
+{
+  "name": "no_defect",
+  "_comment": "Investigator concludes NO_DEFECT_FOUND; Refuter and Verifier validate the no-defect conclusion.",
+  "responses": {
+    "inv.investigator": [
+      "## Investigator Verdict\nNO_DEFECT_FOUND\n\n## Problem Restatement\n- Symptom: (mock) user received a clarification question instead of search results.\n\n## Evidence\n- Required slot `dates.start` is absent.\n- Contract: agent must not search without critical route/date data.\n\n## Hypotheses\n### H1 - no defect; the state machine correctly blocked search pending clarification (Confidence: High)\n- Mechanism: missing critical date triggers ASK_CLARIFICATION.\n- Falsifier: a valid date exists in normalized state before the clarification.\n"
+    ],
+    "inv.refuter": [
+      "## Refutation Verdict\nNOT_REFUTED\n\n## Attacks Attempted\n- Tried to prove a valid date existed in state; none found.\n- The clarification follows the critical-slot gate.\n"
+    ],
+    "inv.verifier": [
+      "## Verification Verdict\nCONFIRMED\n\n## Independent Check\n- The no-defect conclusion holds: search must not run without a start date.\n"
+    ]
+  },
+  "default": {}
+}

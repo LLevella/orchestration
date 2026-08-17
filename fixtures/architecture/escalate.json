@@ -1,0 +1,14 @@
+{
+  "name": "escalate",
+  "_comment": "Exercises both escalation tiers of the developer-centric chain. The Claude Developer review (arch.dev_review) returns the SAME NEEDS_REVISION each cycle -> Architect<->Developer deadlock -> Tech Lead arbitrates with a binding ruling (ARCHITECT_REVIEW_NEEDS_REVISION); the developer still blocks and the ruling repeats -> Architect<->Tech-Lead deadlock -> Arbiter (DeepSeek) returns NEEDS_HUMAN_DECISION -> HUMAN_REQUIRED.",
+  "responses": {
+    "arch.arbiter": [
+      "### Arbitration Verdict\n\nNEEDS_HUMAN_DECISION\n\n### Dispute Summary\n- The Developer says the design overflows a fixed-size buffer budget and must be bounded; the Architect and Tech Lead cannot converge on the footprint tradeoff.\n\n### Final Note for Human\n- This is a scope/footprint tradeoff; Irina should decide.\n"
+    ]
+  },
+  "default": {
+    "arch.author": "# Architecture Proposal: Contested Feature (draft)\n\n## Proposed Design\nA component X that grows a fixed-size buffer beyond its reserved budget in one step.\n",
+    "arch.dev_review": "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The design grows a fixed-size buffer beyond its reserved budget; not buildable safely as written. Must be bounded first.\n",
+    "arch.tech_lead": "## Tech Lead Verdict\nARCHITECT_REVIEW_NEEDS_REVISION\n\n## Ruling\n- The developer's buffer-budget objection holds; the Architect must bound the footprint before this proceeds.\n"
+  }
+}
