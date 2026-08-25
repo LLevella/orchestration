@@ -119,6 +119,54 @@
     },
     "default_mock_scenario": "pass"
   },
+  "review": {
+    "_comment": "MR REVIEW PANEL (added 2026-08-21, Irina). Four experts review the SAME merge request INDEPENDENTLY \u2014 no cross-talk, no iteration, no gate: the deliverable is a LIST OF CODE REMARKS for the author, not a PASS/FAIL verdict, so nothing here blocks or re-runs anybody. Each expert carries one `lens` as EMPHASIS (it still reviews the whole diff) so four opinions cover more ground than four generalists would. A fifth step (Review Moderator) merges the four opinions into one deduplicated, severity-ranked list and the orchestrator writes it to runs/<id>/artifacts/mr-review.md; the moderator may never invent a finding the panel did not make. Experts appear in the document as Reviewer 1..4 \u2014 who was who stays in the run dir, not in the deliverable. Agents are resolved by `roster` at run start; an expert cell whose agent is dead shifts left, so a dead vendor costs one opinion at worst, never the run (>=2 opinions still produce the document).",
+    "max_iterations": 1,
+    "roster": {
+      "_comment": "Four DIFFERENT model families sit on the panel by construction \u2014 the roster assigns each cell a distinct agent, so with everything live the panel is codex \u00b7 claude_reviewer(opus, max-effort) \u00b7 gemini \u00b7 deepseek and claude_sonnet moderates. Nothing is pinned: the point of the panel is four independent heads, and which vendor supplies each of them does not change that. With codex disabled the chain shifts left (claude_reviewer, gemini, deepseek, claude_sonnet on the panel, claude moderating).",
+      "chain": [
+        "codex",
+        "claude_reviewer",
+        "gemini",
+        "deepseek",
+        "claude_sonnet",
+        "claude",
+        "claude_haiku"
+      ],
+      "cells": [
+        "expert_1",
+        "expert_2",
+        "expert_3",
+        "expert_4",
+        "moderator"
+      ]
+    },
+    "expert_1": {
+      "agent": "codex",
+      "role": "MR Review Expert",
+      "lens": "Correctness and regressions: does the change do what the MR claims, what breaks in the paths it touches, which caller or state machine did the author forget."
+    },
+    "expert_2": {
+      "agent": "claude_reviewer",
+      "role": "MR Review Expert",
+      "lens": "Contract and architecture conformance: the backend API spec, the decision log, phase discipline (no later-phase behaviour smuggled into this one), and interfaces other components already depend on."
+    },
+    "expert_3": {
+      "agent": "gemini",
+      "role": "MR Review Expert",
+      "lens": "Security, privacy and data handling: raw PII/PCI reaching prompts, traces or logs; secrets; tenant and ownership isolation; fail-closed behaviour; anything the model is now able to invent (price, availability, policy, booking facts)."
+    },
+    "expert_4": {
+      "agent": "deepseek",
+      "role": "MR Review Expert",
+      "lens": "Tests, observability and maintainability: is the risky new behaviour actually tested, can the test fail, what will be impossible to diagnose in production, what will cost the next reader real time."
+    },
+    "moderator": {
+      "agent": "claude_sonnet",
+      "role": "Review Moderator"
+    },
+    "default_mock_scenario": "pass"
+  },
   "investigation": {
     "_comment": "Root-cause investigation loop. Investigator (Claude/Opus) reads the task-named files/repos/logs/contracts, correlates evidence, and proposes falsifiable hypotheses; it is the ONLY role that may edit/build, and only in dev_repos. Refuter attacks every cycle until it cannot break a hypothesis; the independent Verifier is then the final gate, attacking from a fresh angle; the Arbiter is invoked only on escalation/deadlock. Agents resolved by `roster` at run start. Ends ROOT_CAUSE_ESTABLISHED / NO_DEFECT_FOUND (success) or HUMAN_REQUIRED.",
     "max_iterations": 5,

@@ -21,10 +21,15 @@ HUMAN_REQUIRED = "HUMAN_REQUIRED"
 # Investigation workflow terminal states (both are clean conclusions, exit 0).
 ROOT_CAUSE_ESTABLISHED = "ROOT_CAUSE_ESTABLISHED"
 NO_DEFECT_FOUND = "NO_DEFECT_FOUND"
+# Review workflow terminal state: the panel produced a consolidated remarks
+# document. It says nothing about whether the MR is good — REQUEST_CHANGES from
+# all four experts still finishes REVIEW_COMPLETE, because the deliverable is the
+# remarks list, not a gate decision.
+REVIEW_COMPLETE = "REVIEW_COMPLETE"
 
 # Terminal statuses that count as success (exit code 0). orchestrate.py imports
 # this so the exit-code mapping never drifts from the engine's vocabulary.
-SUCCESS_STATUSES = {PASS, READY, ROOT_CAUSE_ESTABLISHED, NO_DEFECT_FOUND}
+SUCCESS_STATUSES = {PASS, READY, ROOT_CAUSE_ESTABLISHED, NO_DEFECT_FOUND, REVIEW_COMPLETE}
 
 # Arbiter verdicts that mean "stop, a human must decide". Shared by the dev,
 # architecture, and investigation arbitration loops (the investigation arbiter
@@ -64,6 +69,30 @@ def _merge_usage(a, b):
         return None
     a, b = a or {}, b or {}
     return {k: _sum_opt(a.get(k), b.get(k)) for k in set(a) | set(b)}
+
+
+
+# ---- markdown helpers used to assemble the review document ----------
+def _strip_verdict_block(text: str, header: str) -> str:
+    """Drop the machine-readable verdict block (header line + token) from an
+    agent's answer, keeping everything from the next heading on.
+
+    The verdict is orchestration plumbing, not a remark; it belongs in the run
+    journal (where it is already recorded), not in the document a human author
+    works from. Returns the text unchanged if the header is not found."""
+    m = re.search(r"^#{1,6}\s*" + re.escape(header) + r"\s*$", text or "", re.MULTILINE)
+    if not m:
+        return (text or "").strip()
+    nxt = re.search(r"^#{1,6}\s+\S", text[m.end():], re.MULTILINE)
+    return (text[m.end() + nxt.start():] if nxt else text[m.end():]).strip()
+
+
+def _demote_headings(text: str, levels: int = 2) -> str:
+    """Push every markdown heading down `levels` so a quoted document nests under
+    its section instead of breaking the outline of the one that quotes it."""
+    return re.sub(r"^(#{1,6})(?=\s)",
+                  lambda m: "#" * min(6, len(m.group(1)) + levels),
+                  text or "", flags=re.MULTILINE)
 
 
 class Engine:
@@ -177,6 +206,22 @@ class Engine:
                        f"`{nxt or 'NONE'}`, retrying.\n")
         return bool(nxt and nxt != agent)
 
+    def _outside_review_scope(self, violation) -> bool:
+        """Is this guard violation about a repository this run is not reviewing?
+
+        A review is read-only from end to end and takes tens of minutes, during which
+        the human running it keeps working in their own repos. Aborting the whole
+        panel because an unrelated dev repo changed throws away finished, paid-for
+        reviews and blames an agent that could not have done it (a 2026-08-21 run died
+        this way: codex runs sandboxed read-only, yet three files it cannot reach were
+        edited mid-step). A change IN the reviewed repo still aborts, and so does any
+        change whose repository the guard could not attribute.
+        """
+        if self.workflow != "review" or not getattr(self, "_review_repo_label", None):
+            return False
+        labels = getattr(violation, "labels", frozenset())
+        return bool(labels) and self._review_repo_label not in labels
+
     def _finalize(self, step_id, agent, role, system, user_prompt, resp, before,
                   parse, iteration, phase, allow_edit, branches_before=None):
         """Guard-check a step, log it, and return (resp, verdict).
@@ -203,7 +248,15 @@ class Engine:
             try:
                 ctx.guard.assert_unchanged(before, after, agent, step_id)
             except GuardViolation as e:
-                _abort(e)
+                if self._outside_review_scope(e):
+                    ctx.tx.event(kind="guard_out_of_scope", step=step_id, agent=agent,
+                                 repos=sorted(e.labels), detail=str(e))
+                    ctx.tx.md(f"\n> ⚠ the working tree of {', '.join(sorted(e.labels))} changed "
+                              f"during **{step_id}**, but this run reviews "
+                              f"`{self._review_repo_label}` — treated as unrelated activity "
+                              "(someone editing their own repo), not as a violation.\n")
+                else:
+                    _abort(e)
         verdict = extract_verdict(role, resp.text) if parse else None
         ctx.tx.step(step_id, agent, role, system, user_prompt, resp, verdict, iteration, phase)
         if resp.status != OK:
@@ -279,13 +332,15 @@ class Engine:
         return self.ctx.tx.finish(status, reason)
 
     # ---- public entrypoint -------------------------------------------
-    def run(self, task, arch_ref=None):
+    def run(self, task, arch_ref=None, mr=None):
         try:
             self._setup_roster()
             if self.workflow == "architecture":
                 return self._run_architecture(task)
             if self.workflow == "investigation":
                 return self._run_investigation(task)
+            if self.workflow == "review":
+                return self._run_review(task, mr)
             return self._run_development(task, arch_ref)
         except (AgentError, GuardViolation) as e:
             return self._finish(HUMAN_REQUIRED, f"Aborted: {e}")
@@ -1182,3 +1237,242 @@ class Engine:
 
         return self._finish(HUMAN_REQUIRED,
                             "Arbitration exhausted without an established root cause.")
+
+    # ================= REVIEW (MR panel) ==============================
+    # Four experts review the SAME merge request INDEPENDENTLY — no cross-talk, no
+    # iteration, no gate — and a moderator merges their opinions into one list of
+    # code remarks, which this file writes to disk. Nothing in this chain can block,
+    # re-run, or overrule anyone: the deliverable is the remarks list a human author
+    # works from, and the run is over once it exists.
+    #
+    # The document deliberately carries NO run id and NO model names: reviewers appear
+    # as "Reviewer 1..4" in the order they were called. Who was who is in the run dir
+    # (opinion-N-<agent>.md, transcript.md, events.jsonl), which is where provenance
+    # belongs — the document itself is ours to hand to a colleague.
+    def _panel_specs(self):
+        """Ordered (cell, spec) for the expert seats declared in the review config.
+        Order is the config's insertion order, which is also the Reviewer numbering."""
+        wf = self.ctx.workflows["review"]
+        return [(k, v) for k, v in wf.items()
+                if isinstance(v, dict) and v.get("role") == "MR Review Expert"
+                and v.get("enabled", True)]
+
+    def _mr_block(self, mr):
+        """The change under review, identical for every reviewer."""
+        parts = ["## Change under review\n" + "\n".join(mr.header_lines())]
+        if mr.commits:
+            parts.append(f"## Commits on this branch\n```\n{mr.commits}\n```")
+        if mr.stat:
+            parts.append(f"## Files changed\n```\n{mr.stat}\n```")
+        parts.append("## Diff — this is the authoritative content of the change\n"
+                     f"```diff\n{mr.diff}\n```")
+        return "\n\n".join(parts)
+
+    def _review_scope_line(self, mr):
+        """Scope for a review run. NOT the dev workflow's writable/read-only line: a
+        review targets one repository, which may well be one the dev workflow never
+        touches, and everything else in the workspace is out of scope."""
+        where = (f"the ONLY repository in scope is `{mr.repo_label}`, and it is READ-ONLY "
+                 "for you" if mr.repo_path else
+                 "you have no repository in scope — only the patch below")
+        return (f"Scope — {where}. Anything else in the workspace (other repositories, "
+                "other teams' or tasks' directories, the orchestration tooling) is NOT part "
+                "of this review: do not read, reference, or flag it.")
+
+    def _mr_expert_prompt(self, task, mr, lens, n, total):
+        p = [f"You are reviewer {n} of {total} on this merge request. The other reviewers "
+             "are reading the same change right now, independently; you will not see their "
+             "opinions and they will not see yours. Review it as you would a colleague's MR.",
+             self._mr_block(mr)]
+        if lens:
+            p.append(f"## Your emphasis\n{lens}\n\nThis is an EMPHASIS, not a boundary: "
+                     "you still review the whole diff, and you still raise anything serious "
+                     "you find outside your emphasis.")
+        if task and task.strip():
+            p.append("## What the author (or the person requesting this review) says\n"
+                     + task.strip())
+        if mr.repo_path:
+            p.append(f"## Reading the surrounding code\n`{mr.repo_label}/` is a real "
+                     "repository in your working directory: open the touched files, their "
+                     "callers, and the tests to check a suspicion before you raise it. You "
+                     "are READ-ONLY — do not edit, create, or delete anything.")
+        else:
+            p.append("## Reading the surrounding code\nYou were given a patch file, not a "
+                     "repository: judge only what the patch shows, and put anything you "
+                     "cannot verify from it under 'What I could not check'.")
+        p.append(self._review_scope_line(mr))
+        # The global policy makes every agent WRITE in English. A reviewer reading a
+        # repository whose team writes in another language then reports its comments as
+        # a policy violation — observed on the first real run, where the monolith's
+        # Russian docblocks came back as a remark. The rule is about the reviewer's own
+        # output, never about the reviewed code's conventions.
+        p.append("Language: your own review must be in English, but that rule is about "
+                 "YOUR output only. The reviewed repository follows its own team's "
+                 "conventions — never raise a remark about the natural language of its "
+                 "comments, docs, or messages unless the change itself is inconsistent "
+                 "with the surrounding code.")
+        p.append("Answer in your role's output format. Every remark needs all five fields "
+                 "(Severity, Location, Remark, Why it matters, Suggested change) — a remark "
+                 "without a location and a concrete requested change is not usable by the "
+                 "author, so drop it instead.")
+        return "\n\n".join(p)
+
+    def _mr_moderator_prompt(self, task, mr, opinions):
+        p = [f"{len(opinions)} reviewers looked at this merge request independently. Merge "
+             "their opinions into ONE list of code remarks for the author, following your role's "
+             "rules: never invent a remark, merge duplicates, keep single-reviewer remarks, "
+             "mark contradictions DISPUTED, and refer to reviewers only by number.",
+             self._mr_block(mr)]
+        if task and task.strip():
+            p.append("## What the author (or the person requesting this review) says\n"
+                     + task.strip())
+        for o in opinions:
+            p.append(f"## Reviewer {o['n']} — verdict: {o['verdict'] or 'unparsed'}\n"
+                     + (o["text"] or "(this reviewer produced no usable opinion)"))
+        p.append("Answer in your role's output format.")
+        return "\n\n".join(p)
+
+    def _panel_tally(self, opinions):
+        """Deterministic count of the panel's verdicts — computed here, never asked of
+        a model, so the headline of the document cannot drift from what was said."""
+        lines = [f"- Reviewer {o['n']}: **{o['verdict'] or 'no opinion (reviewer unavailable)'}**"
+                 for o in opinions]
+        spoke = [o for o in opinions if o["verdict"]]
+        changes = [o for o in spoke if o["verdict"] == "REQUEST_CHANGES"]
+        comments = [o for o in spoke if o["verdict"] == "APPROVE_WITH_COMMENTS"]
+        n = len(spoke)
+        if not spoke:
+            head = "No reviewer produced a verdict."
+        elif changes:
+            head = f"**Changes requested** by {len(changes)} of {n} reviewers who answered."
+        elif comments:
+            head = (f"No blocking objection; {len(comments)} of {n} reviewers left "
+                    "non-blocking comments.")
+        else:
+            head = f"**Approved** by all {n} reviewers who answered."
+        return head, lines
+
+    def _review_document(self, mr, opinions, body):
+        """Assemble the deliverable: provenance of the change, the panel tally, the
+        consolidated remarks, and each reviewer's own opinion as an appendix."""
+        head, tally = self._panel_tally(opinions)
+        doc = [f"# Code review remarks — {mr.subject}", ""]
+        doc += [f"- {line}" for line in mr.header_lines()]
+        if mr.stat:
+            doc.append(f"- Diffstat: {mr.stat.splitlines()[-1].strip()}")
+        doc += ["", "## Panel", "", head, ""] + tally
+        doc += ["", body.strip(), "", "## Appendix — the individual reviews", ""]
+        for o in opinions:
+            doc.append(f"### Reviewer {o['n']} — {o['verdict'] or 'no opinion'}")
+            doc.append("")
+            doc.append(_demote_headings(
+                _strip_verdict_block(o["text"], "MR Review Verdict"), 2)
+                if o["text"].strip() else
+                f"_No opinion: this reviewer was unavailable ({o.get('error', 'unknown')})._")
+            doc.append("")
+        return "\n".join(doc) + "\n"
+
+    def _fallback_body(self, opinions):
+        """Consolidated section when the moderator could not produce one: every
+        reviewer's remarks verbatim, deduplicated by nobody. Worse to read than a
+        moderated list, and honest about being so — but the four opinions were paid
+        for, so they are never thrown away."""
+        out = ["## Remarks — NOT consolidated",
+               "",
+               "The consolidation step did not complete, so the remarks below are each "
+               "reviewer's own list, unmerged: expect the same defect to appear more than "
+               "once under different wording, and expect contradictions to be unmarked.",
+               ""]
+        for o in opinions:
+            if not o["text"].strip():
+                continue
+            out.append(f"### From Reviewer {o['n']} ({o['verdict'] or 'no verdict'})")
+            out.append("")
+            out.append(_demote_headings(
+                _strip_verdict_block(o["text"], "MR Review Verdict"), 2))
+            out.append("")
+        return "\n".join(out)
+
+    def _run_review(self, task, mr):
+        ctx = self.ctx
+        if mr is None or not (mr.diff or "").strip():
+            return self._finish(HUMAN_REQUIRED,
+                                "No merge request was resolved for this run (empty diff).")
+        self._review_repo_label = mr.repo_label
+        ctx.tx.artifact("mr-diff.patch", mr.diff)
+        ctx.tx.update_meta(mr=mr.spec_dict())
+        ctx.tx.md("\n## Change under review\n\n```\n"
+                  + "\n".join(mr.header_lines()) + "\n```\n")
+
+        specs = self._panel_specs()
+        opinions = []
+        for n, (cell, spec) in enumerate(specs, 1):
+            prompt = self._mr_expert_prompt(task, mr, spec.get("lens"), n, len(specs))
+            rec = {"n": n, "cell": cell, "agent": spec.get("agent"), "verdict": None, "text": ""}
+            try:
+                resp, verdict = self.call(f"review.{cell}", spec, prompt,
+                                          phase="panel", iteration=1)
+            except AgentError as e:
+                # A dead vendor costs ONE opinion, not the panel: three independent
+                # heads still produce a usable remarks list, and aborting here would
+                # throw away the reviews that already succeeded.
+                rec["error"] = str(e)
+                ctx.tx.event(kind="panel_seat_lost", cell=cell, agent=spec.get("agent"),
+                             detail=str(e)[:400])
+                ctx.tx.md(f"\n> ⚠ panel seat **{cell}** produced no opinion: {e}\n")
+                opinions.append(rec)
+                continue
+            rec.update(verdict=verdict, text=resp.text or "", agent=spec["agent"])
+            opinions.append(rec)
+            ctx.tx.artifact(f"opinion-{n}-{spec['agent']}.md", resp.text or "")
+
+        usable = [o for o in opinions if o["text"].strip()]
+        ctx.tx.event(kind="panel_summary", seats=len(specs), opinions=len(usable),
+                     verdicts=[o["verdict"] for o in opinions])
+        if not usable:
+            return self._finish(HUMAN_REQUIRED,
+                                f"None of the {len(specs)} reviewers produced an opinion; "
+                                "no remarks document was written.")
+
+        body, status, reason = None, REVIEW_COMPLETE, None
+        if not self._gate_enabled("moderator"):
+            # Consolidation switched off in config: that is a deliberate choice (the
+            # raw four opinions, cheaper by one step), not a failure — the document is
+            # still the deliverable and the run still succeeds.
+            body = self._fallback_body(opinions)
+            reason = (f"{len(usable)} of {len(specs)} reviewers reviewed the change; "
+                      "consolidation is disabled in config, so the document holds their "
+                      "remarks unmerged.")
+        elif len(usable) < 2:
+            body = self._fallback_body(opinions)
+            status = HUMAN_REQUIRED
+            reason = (f"Only 1 of {len(specs)} reviewers produced an opinion — the document "
+                      "holds that single review, unmoderated. Re-run when the other agents "
+                      "are available.")
+        else:
+            mod = ctx.workflows["review"]["moderator"]
+            try:
+                mresp, mverdict = self.call("review.moderator", mod,
+                                            self._mr_moderator_prompt(task, mr, usable),
+                                            phase="consolidation", iteration=1)
+            except AgentError as e:
+                body, status = self._fallback_body(opinions), HUMAN_REQUIRED
+                reason = (f"{len(usable)} opinions collected, but consolidation failed ({e}). "
+                          "The document holds every reviewer's remarks unmerged.")
+            else:
+                if mverdict == "CONSOLIDATED":
+                    body = _strip_verdict_block(mresp.text, "Review Summary Verdict")
+                    reason = (f"{len(usable)} of {len(specs)} reviewers reviewed the change; "
+                              "their remarks are consolidated in artifacts/mr-review.md.")
+                else:
+                    body, status = self._fallback_body(opinions), HUMAN_REQUIRED
+                    reason = (f"Consolidation returned {mverdict or 'no parseable verdict'}; "
+                              "the document holds every reviewer's remarks unmerged.")
+
+        doc = self._review_document(mr, opinions, body)
+        ctx.tx.artifact("mr-review.md", doc)
+        ctx.tx.update_meta(review_document=str(ctx.tx.dir / "artifacts" / "mr-review.md"))
+        head, _ = self._panel_tally(opinions)
+        ctx.tx.md(f"\n## Panel result\n\n{head}\n\nRemarks document: "
+                  "`artifacts/mr-review.md`\n")
+        return self._finish(status, reason)

@@ -39,6 +39,12 @@ def git_clean_env() -> dict:
 
 BASE = Path(__file__).resolve().parent.parent  # the orchestration/ directory
 
+# Every workflow the orchestrator ships. Single source of truth for config
+# validation, the role-file inventory, and the CLI's inspection commands, so a
+# newly added chain cannot be half-registered (validated but never listed, or
+# listed but never validated).
+WORKFLOWS = ("architecture", "development", "review", "investigation")
+
 _NO_HEAD = "(no git HEAD; diff unavailable)"
 
 # Untracked files are rendered as real new-file diffs, not just listed by name.
@@ -134,7 +140,7 @@ def _validate(agents, workflows):
     if "paths" not in workflows:
         raise ConfigError("workflows.json: missing 'paths' object")
     known = {n for n in agents["agents"] if not n.startswith("_")}
-    for wf in ("architecture", "development", "investigation"):
+    for wf in WORKFLOWS:
         if wf not in workflows:
             raise ConfigError(f"workflows.json: missing '{wf}' workflow")
         if "default_mock_scenario" not in workflows[wf]:
@@ -194,7 +200,7 @@ class RunContext:
     def roles_present(self):
         """Map each configured role to whether its file exists."""
         seen = {}
-        for wf in ("architecture", "development", "investigation"):
+        for wf in WORKFLOWS:
             for spec in self.workflows[wf].values():
                 if isinstance(spec, dict) and "role" in spec:
                     r = spec["role"]

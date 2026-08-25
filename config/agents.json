@@ -37,7 +37,9 @@
         "Responsible Developer",
         "Root Cause Investigator",
         "Developer Verifier",
-        "Software Engineering Code Reviewer"
+        "Software Engineering Code Reviewer",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     },
     "claude_sonnet": {
@@ -74,7 +76,9 @@
       },
       "roles": [
         "Hypothesis Refuter",
-        "Adversarial Verifier"
+        "Adversarial Verifier",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     },
     "claude_reviewer": {
@@ -109,7 +113,9 @@
       },
       "roles": [
         "Software Engineering Code Reviewer",
-        "Developer Verifier"
+        "Developer Verifier",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     },
     "claude_haiku": {
@@ -150,7 +156,9 @@
         "Arbitration Reviewer",
         "Investigation Arbiter",
         "Technical Lead",
-        "System Architect"
+        "System Architect",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     },
     "codex": {
@@ -177,13 +185,18 @@
         "System Architect",
         "Software Engineering Code Reviewer",
         "Adversarial Verifier",
-        "Hypothesis Refuter"
+        "Hypothesis Refuter",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     },
     "gemini": {
       "disabled": false,
-      "transport": "cli",
-      "command": [
+      "transport": "api",
+      "api_base": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      "api_env": "GEMINI_API_KEY",
+      "model": "gemini-2.5-flash",
+      "cli_command": [
         "/home/irina/.nvm/versions/node/v22.23.1/bin/gemini",
         "-p",
         "",
@@ -204,15 +217,17 @@
         "System Architecture Reviewer",
         "Technical Lead",
         "Hypothesis Refuter",
-        "Adversarial Verifier"
+        "Adversarial Verifier",
+        "MR Review Expert",
+        "Review Moderator"
       ],
       "env": {
         "GEMINI_CLI_TRUST_WORKSPACE": "true"
       },
-      "_note": "2026-07-17: ENABLED via Google AI Studio API key in orchestration/gemini.env (sourced by ~/.bashrc). OAuth/GCA free tier is dead (UNSUPPORTED_CLIENT); the API key authenticates fine. Model pinned to gemini-2.5-flash because gemini-pro-latest returns 429 TerminalQuotaError on the free tier (pro quota ~0); flash has real free quota. If pro is ever needed, add billing to the key."
+      "_note": "2026-07-17: ENABLED via Google AI Studio API key in orchestration/gemini.env (sourced by ~/.bashrc). OAuth/GCA free tier is dead (UNSUPPORTED_CLIENT); the API key authenticates fine. Model pinned to gemini-2.5-flash because gemini-pro-latest returns 429 TerminalQuotaError on the free tier (pro quota ~0); flash has real free quota. If pro is ever needed, add billing to the key. 2026-08-21: transport switched cli -> api, because the CLI does not stay on the model it is given. An MR-review step died with \"429 ... generate_content_free_tier_requests, limit: 20, model: gemini-3.5-flash\" although the command pins -m gemini-2.5-flash: this key has effectively NO free allowance on 3.5-flash (a single one-word request to it 429s), while gemini-2.5-flash serves the same 33.6k-token review prompt over the API in ~22s. Checked the same day: gemini-3.1-pro-preview and gemini-pro-latest also 429 (free-tier pro quota is 0) and gemini-2.5-pro is 404 \"no longer available to new users\" \u2014 so 2.5-flash is not a compromise, it is the ceiling this key can actually reach. The API transport sends one request per step on the model we asked for, with no fallback of its own. Cost: no file access \u2014 gemini reviews what is in the prompt. `cli_command` below is kept so flipping transport back to \"cli\" restores the old behaviour."
     },
     "deepseek": {
-      "_comment": "Independent 4th-family arbiter. Two transports supported: api (key in api_env) or cli (for example a local model).",
+      "_comment": "Independent 4th-family arbiter. Two transports supported: api (key in api_env) or cli (for example a local model). 2026-08-21: GET /models on this key returns exactly deepseek-v4-flash, deepseek-v4-pro and deepseek-v4-flash-vision-exp \u2014 v4-pro below is the strongest model the account can reach, so there is no upgrade to make here.",
       "transport": "api",
       "api_base": "https://api.deepseek.com/chat/completions",
       "api_env": "DEEPSEEK_API_KEY",
@@ -230,7 +245,9 @@
       "roles": [
         "Arbitration Reviewer",
         "Investigation Arbiter",
-        "Adversarial Verifier"
+        "Adversarial Verifier",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     }
   }

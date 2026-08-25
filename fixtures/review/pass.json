@@ -1,0 +1,22 @@
+{
+  "name": "pass",
+  "_comment": "Happy path: all four experts answer, the moderator consolidates. Terminal status REVIEW_COMPLETE — note that REQUEST_CHANGES from the panel is still a successful RUN: the deliverable is the remarks list.",
+  "responses": {
+    "review.expert_1": [
+      "## MR Review Verdict\nREQUEST_CHANGES\n\n## Summary\n- Retry loop is unbounded.\n\n## Remarks\n### R1\n- Severity: BLOCKER\n- Location: mock/service.py:4\n- Remark: (mock) retry is unbounded\n- Why it matters: (mock) the caller would observe a wrong result.\n- Suggested change: (mock) handle the case explicitly.\n\n## What I checked\n- (mock) the diff and the touched file.\n\n## What I could not check\n- nothing\n"
+    ],
+    "review.expert_2": [
+      "## MR Review Verdict\nREQUEST_CHANGES\n\n## Summary\n- Same unbounded retry, spec says fail closed.\n\n## Remarks\n### R1\n- Severity: BLOCKER\n- Location: mock/service.py:4\n- Remark: (mock) contradicts the fail-closed rule\n- Why it matters: (mock) the caller would observe a wrong result.\n- Suggested change: (mock) handle the case explicitly.\n\n## What I checked\n- (mock) the diff and the touched file.\n\n## What I could not check\n- nothing\n"
+    ],
+    "review.expert_3": [
+      "## MR Review Verdict\nAPPROVE\n\n## Summary\n- No privacy or isolation impact.\n\n## Remarks\n## What I checked\n- (mock) the diff and the touched file.\n\n## What I could not check\n- nothing\n"
+    ],
+    "review.expert_4": [
+      "## MR Review Verdict\nAPPROVE_WITH_COMMENTS\n\n## Summary\n- Retry path is untested.\n\n## Remarks\n### R1\n- Severity: MINOR\n- Location: mock/service.py:4\n- Remark: (mock) no test covers the retry\n- Why it matters: (mock) the caller would observe a wrong result.\n- Suggested change: (mock) handle the case explicitly.\n\n## What I checked\n- (mock) the diff and the touched file.\n\n## What I could not check\n- nothing\n"
+    ],
+    "review.moderator": [
+      "## Review Summary Verdict\nCONSOLIDATED\n\n## Overall assessment\n- (mock) The change adds a retry to a backend call. Two reviewers found the same\n  unbounded-retry defect; the rest are non-blocking.\n\n## Remarks\n| # | Severity | Location | Raised by | Remark |\n|---|---|---|---|---|\n| 1 | BLOCKER | mock/service.py:4 | 1,2 | Retry is unbounded and can hammer the backend. |\n| 2 | MINOR | mock/service.py:4 | 4 | No test covers the retry path. |\n\n### 1 — mock/service.py:4 — BLOCKER\n- Remark: Retry is unbounded.\n- Why it matters: A failing backend turns one request into an infinite loop.\n- Suggested change: Cap retries and surface the final failure.\n- Raised by: Reviewer 1, 2\n- Disputed: no\n\n### 2 — mock/service.py:4 — MINOR\n- Remark: No test covers the retry path.\n- Why it matters: The behaviour can regress silently.\n- Suggested change: Add a test that forces one failure then a success.\n- Raised by: Reviewer 4\n- Disputed: no\n\n## Dropped\n- nothing dropped\n\n## Open questions for the author\n- none\n"
+    ]
+  },
+  "default": {}
+}

@@ -27,7 +27,7 @@ class TestChains(unittest.TestCase):
     def test_lists_all_workflows_and_every_agent(self):
         rc, out = _run()
         self.assertEqual(rc, 0, out[-600:])
-        for wf in ("ARCHITECTURE", "DEVELOPMENT", "INVESTIGATION"):
+        for wf in ("ARCHITECTURE", "DEVELOPMENT", "REVIEW", "INVESTIGATION"):
             self.assertIn(wf, out, f"workflow {wf} missing from chains output")
         agents_cfg, _ = load_config()
         for name in agents_cfg["agents"]:

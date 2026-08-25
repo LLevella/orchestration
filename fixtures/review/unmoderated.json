@@ -1,0 +1,22 @@
+{
+  "name": "unmoderated",
+  "_comment": "Degraded path: the panel answers but consolidation returns INSUFFICIENT_INPUT. The document is still written (every reviewer's remarks, unmerged) and the run ends HUMAN_REQUIRED.",
+  "responses": {
+    "review.expert_1": [
+      "## MR Review Verdict\nREQUEST_CHANGES\n\n## Summary\n- Retry loop is unbounded.\n\n## Remarks\n### R1\n- Severity: BLOCKER\n- Location: mock/service.py:4\n- Remark: (mock) retry is unbounded\n- Why it matters: (mock) the caller would observe a wrong result.\n- Suggested change: (mock) handle the case explicitly.\n\n## What I checked\n- (mock) the diff and the touched file.\n\n## What I could not check\n- nothing\n"
+    ],
+    "review.expert_2": [
+      "## MR Review Verdict\nAPPROVE\n\n## Summary\n- Looks fine against the contract.\n\n## Remarks\n## What I checked\n- (mock) the diff and the touched file.\n\n## What I could not check\n- nothing\n"
+    ],
+    "review.expert_3": [
+      "## MR Review Verdict\nAPPROVE\n\n## Summary\n- No privacy impact.\n\n## Remarks\n## What I checked\n- (mock) the diff and the touched file.\n\n## What I could not check\n- nothing\n"
+    ],
+    "review.expert_4": [
+      "## MR Review Verdict\nAPPROVE_WITH_COMMENTS\n\n## Summary\n- Untested path.\n\n## Remarks\n### R1\n- Severity: MINOR\n- Location: mock/service.py:4\n- Remark: (mock) no test covers the retry\n- Why it matters: (mock) the caller would observe a wrong result.\n- Suggested change: (mock) handle the case explicitly.\n\n## What I checked\n- (mock) the diff and the touched file.\n\n## What I could not check\n- nothing\n"
+    ],
+    "review.moderator": [
+      "## Review Summary Verdict\nINSUFFICIENT_INPUT\n\n## Overall assessment\n- (mock) the opinions did not reach me.\n"
+    ]
+  },
+  "default": {}
+}

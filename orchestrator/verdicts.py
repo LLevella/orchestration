@@ -35,6 +35,18 @@ ROLE_VERDICTS = {
         "TECH_LEAD_IS_RIGHT", "BOTH_PARTIALLY_RIGHT", "OVERENGINEERING_DETECTED",
         "NEEDS_SMALLER_FIX", "NEEDS_HUMAN_DECISION", "INSUFFICIENT_INFORMATION",
     ]),
+    # ---- review workflow (MR panel) ----
+    # Four experts review the same MR independently; the tally of these verdicts is
+    # what "the panel's opinion" means, so the vocabulary is the one a human uses in
+    # a merge request, not a gate token.
+    "MR Review Expert": ("MR Review Verdict", [
+        "APPROVE", "APPROVE_WITH_COMMENTS", "REQUEST_CHANGES",
+    ]),
+    # The moderator does not judge the code — it judges whether it received enough
+    # usable opinions to produce one consolidated remarks list.
+    "Review Moderator": ("Review Summary Verdict", [
+        "CONSOLIDATED", "INSUFFICIENT_INPUT",
+    ]),
     # ---- investigation workflow ----
     "Root Cause Investigator": ("Investigator Verdict", [
         "HYPOTHESIS_READY_FOR_REFUTATION", "BLOCKED_NEED_MORE_DATA", "NO_DEFECT_FOUND",
