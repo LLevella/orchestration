@@ -1,0 +1,11 @@
+{
+  "name": "insufficient",
+  "_comment": "The Review Arbiter cannot judge (INSUFFICIENT_INPUT) -> HUMAN_REQUIRED (exit 2). Exercises the failure edge: a review run only fails on infra/no-input, never merely because the artifact scored badly.",
+  "responses": {
+    "review.reviewer_correctness": ["## Review Verdict\nSOLID\n\n### Findings\n- none\n"],
+    "review.reviewer_completeness": ["## Review Verdict\nSOLID\n\n### Findings\n- none\n"],
+    "review.reviewer_risk": ["## Review Verdict\nSOLID\n\n### Findings\n- none\n"],
+    "review.arbiter": ["## Review Arbiter Verdict\nINSUFFICIENT_INPUT\n\nThe artifact body was not provided; cannot judge.\n"]
+  },
+  "default": {}
+}

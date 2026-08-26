@@ -1,0 +1,16 @@
+{
+  "name": "techlead_rework",
+  "_comment": "Developer returns FEASIBLE, but the Tech-Lead control review rejects once (ARCHITECT_REVIEW_NEEDS_REVISION) -> back into the Architect<->Developer loop -> Developer FEASIBLE again -> Tech-Lead READY_FOR_HUMAN_REVIEW -> PASS at iteration 2. Proves the Tech-Lead-rejection back-edge (not straight to the arbiter) below techlead_reject_before_arbiter.",
+  "responses": {
+    "arch.dev_review": [
+      "## Implementation Feasibility Verdict\nFEASIBLE\n\n## Blocking Implementation Gaps\n- None.\n"
+    ],
+    "arch.tech_lead": [
+      "## Tech Lead Verdict\nARCHITECT_REVIEW_NEEDS_REVISION\n\n## Ruling\n- Sound but tighten the error-handling section before it ships.\n",
+      "## Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\n## Control Review\n- Error handling now explicit; approved.\n"
+    ]
+  },
+  "default": {
+    "arch.author": "# Architecture Proposal: Reworked Feature (draft)\n\n## Proposed Design\nComponent X with explicit startup error handling and a unit-test contract.\n"
+  }
+}

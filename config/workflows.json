@@ -1,0 +1,115 @@
+{
+  "_comment": "Workflow control parameters. Config is authoritative for agent<->role binding and limits; the engine owns control flow. Paths are resolved relative to the orchestration/ directory.",
+  "paths": {
+    "_comment": "repo_root is the multi-repo workspace root and the cwd every agent CLI is launched in (so they can read all repos, roles, and docs). It is NOT itself a git repo. dev_repos = repos the Developer (Claude) MAY edit; analysis_repos = read-only context, never modified. Both lists are resolved relative to repo_root; the git guard watches ALL of them and capture_diff aggregates their diffs (each repo labelled writable/read-only).",
+    "repo_root": "..",
+    "roles_dir": "../roles",
+    "docs_architecture": "../docs/architecture",
+    "dev_repos": ["dataplane-phs-ng", "dataplane-sdk"],
+    "analysis_repos": ["MCD4_Lite", "ncc-core", "idu/sdk-s8000"]
+  },
+  "guard": {
+    "_comment": "exclude_prefix is applied within each watched repo; the orchestration/ tool dir lives at the workspace root (outside every watched repo), so its run output never appears in any repo's status.",
+    "enabled": true,
+    "exclude_prefix": "orchestration"
+  },
+  "validation": {
+    "_comment": "RESERVED / NOT YET ENFORCED. The orchestrator itself never executes build/test commands; the Developer (Claude) agent runs them inside its own sandbox during its step. These fields document intended policy and are read by no code today: reviewers stay pure-analysis. Wiring orchestrator-side command execution is deliberately out of scope for the conservative first cut.",
+    "developer_commands": ["scripts/ci-local"],
+    "allow_reviewer_commands": false,
+    "allowed_readonly_commands": []
+  },
+  "architecture": {
+    "_comment": "Developer-centric chain, two escalation tiers. Codex (System Architect) AUTHORS the proposal; the MAX-EFFORT Claude Developer Verifier is the PRIMARY reviewer — the developer who will build it does the developer review of every draft (FEASIBLE/NEEDS_REVISION/HUMAN_REQUIRED) and FEASIBLE is required but NOT sufficient: after the Developer returns FEASIBLE the Tech Lead runs a MANDATORY control review and its READY_FOR_HUMAN_REVIEW is the PASS (a control rejection sends the Architect back to revise + the Developer to re-verify). An Architect<->Developer deadlock (never FEASIBLE) routes to Tech-Lead arbitration (tier 1); a Tech-Lead control/arbitration deadlock or ESCALATE routes to the Arbiter (tier 2). No standalone code-review gate. (Tech-Lead control gate added 2026-06-19, Irina.) Agents are resolved by `roster` at run start (the per-cell `agent` below is the all-live default and is overwritten by the roster). (Restructured 2026-06-15; roster 2026-06-15.)",
+    "max_iterations": 10,
+    "escalate_after_cycles": 5,
+    "techlead_reject_before_arbiter": 5,
+    "_flow_note": "Control flow (Irina 2026-08-13): Architect<->Developer loop; Developer FEASIBLE -> Tech-Lead review; Tech-Lead READY_FOR_HUMAN_REVIEW -> PASS (hand to human). escalate_after_cycles consecutive Developer NEEDS_REVISION -> Arbiter. Tech-Lead non-approval -> back into the Architect<->Developer loop; techlead_reject_before_arbiter cumulative non-approvals (or ESCALATE_TO_HUMAN) -> Arbiter. Arbiter ruling reopens the loop; if the Arbiter cannot decide the run PAUSES (AWAITING_HUMAN) and is resumed with `--human-answer`, fed back as a binding ruling. max_iterations bounds total author iterations.",
+    "arbitration": { "max_iterations": 10, "trigger_after_cycles": 2 },
+    "roster": {
+      "_comment": "Approved chain (Irina 2026-06-15): codex · opus(pinned dev, max-effort) · gemini · deepseek · sonnet · haiku. developer_verifier is PINNED to claude_reviewer — the shift-left jumps OVER it so the developer review is ALWAYS a real Claude developer, never displaced to another vendor (if opus itself exhausts the pin falls back to claude_sonnet→claude_haiku, still Claude). Non-pinned cells (author, tech_lead, arbiter) fill positionally from the live chain. With codex disabled: author=gemini, dev_verifier=claude_reviewer, tech_lead=deepseek, arbiter=claude_sonnet.",
+      "_author_swap_2026_07_10": "REVERTED 2026-07-10 (Irina: 'codex ожил, можно использовать') — codex back at arch-chain head (cross-vendor author restored). The temporary codex->claude swap covered the window when codex was quota-dying mid-arch (run 20260709T173818Z-architecture-5bdc died iter6). The claude-author finalization run 20260710T081637Z-architecture-6fb6 launched during the swap keeps its snapshotted roster (author=claude) and finishes on Opus; this revert affects only subsequent arch runs. Operational toggle, NOT synced to phs-rs.",
+      "chain": ["codex", "claude_reviewer", "gemini", "deepseek", "claude_sonnet", "claude_haiku"],
+      "cells": ["author", "developer_verifier", "tech_lead", "arbiter"],
+      "pinned": { "developer_verifier": "claude_reviewer" }
+    },
+    "author":             { "agent": "codex",          "role": "System Architect", "wrapper": "architecture_author.md" },
+    "developer_verifier": { "agent": "claude_reviewer", "role": "Developer Verifier" },
+    "tech_lead":          { "agent": "gemini",   "role": "Technical Lead" },
+    "arbiter":            { "agent": "deepseek", "role": "Arbitration Reviewer" },
+    "default_mock_scenario": "pass"
+  },
+  "development": {
+    "_comment": "Claude (Responsible Developer) implements; there is NO developer/code review — the Claude peer code-review stage was REMOVED (Irina 2026-08-17). After implementation the ARCHITECT (System Architect, codex) reviews directly; only when the Architect passes does the Tech Lead (final gate) run. STAGED gate: Architect review FIRST, then Tech Lead. An architecture question raised mid-implementation is answered by the ARCHITECT, not the arbiter; the Arbiter is called ONLY to break a genuine deadlock (the same blocker repeats > trigger_after_cycles). Agents resolved by `roster` at run start. (code-review removed 2026-08-17; staged gate + arbiter-on-deadlock 2026-06-22; roster 2026-06-15.)",
+    "max_iterations": 10,
+    "arbitration": { "max_iterations": 10, "trigger_after_cycles": 2 },
+    "roster": {
+      "_comment": "Approved chain (Irina 2026-08-17, code-review removed): opus · codex · gemini · deepseek · sonnet · haiku. cell[i]=chain[i] when all live; an unavailable/disabled/EXHAUSTED agent shifts the chain left. With codex disabled: developer=claude, architect=gemini, tech_lead=deepseek, arbiter=claude_sonnet.",
+      "chain": ["claude", "codex", "gemini", "deepseek", "claude_sonnet", "claude_haiku"],
+      "cells": ["developer", "architect", "tech_lead", "arbiter"]
+    },
+    "developer":     { "agent": "claude",   "role": "Responsible Developer" },
+    "architect":     { "agent": "codex",    "role": "System Architect" },
+    "tech_lead":     { "agent": "gemini",   "role": "Technical Lead" },
+    "arbiter":       { "agent": "deepseek", "role": "Arbitration Reviewer" },
+    "default_mock_scenario": "pass"
+  },
+  "investigation": {
+    "_comment": "Root-cause investigation loop. Investigator (Claude/Opus) reads all five repos on the branches named in the problem, reads the named servers' logs, correlates, and proposes falsifiable hypotheses; it is the ONLY role that may edit/build, and only in dev_repos. Refuter attacks every cycle until it cannot break a hypothesis; the independent Verifier is then the final gate, attacking from a fresh angle; the Arbiter is invoked only on escalation/deadlock. Agents resolved by `roster` at run start (replaces the former manual TEMP_OVERRIDE — the chain now shifts left around the disabled codex automatically). Ends ROOT_CAUSE_ESTABLISHED / NO_DEFECT_FOUND (success) or HUMAN_REQUIRED.",
+    "max_iterations": 5,
+    "_max_iterations_note": "Lowered 10->5 on 2026-06-16: a round-9 run thrashed for 6+ iterations (investigator kept re-deriving, refuter kept refuting) without converging. A focused, code-anchored task should converge in 2-3; 5 is a guardrail against burning hours + DeepSeek balance on non-convergence.",
+    "arbitration": { "max_iterations": 10, "trigger_after_cycles": 2 },
+    "roster": {
+      "_comment": "Approved chain (Irina 2026-06-15): opus · codex · gemini · deepseek · sonnet · haiku. cell[i]=chain[i] when all live; an unavailable/disabled/EXHAUSTED agent shifts the chain left. The judge (arbiter) is filled positionally, NOT reserved from the strong end. With codex disabled: investigator=claude(opus), refuter=gemini, verifier=deepseek, arbiter=claude_sonnet.",
+      "chain": ["claude", "codex", "gemini", "deepseek", "claude_sonnet", "claude_haiku"],
+      "cells": ["investigator", "refuter", "verifier", "arbiter"]
+    },
+    "investigator": { "agent": "claude",   "role": "Root Cause Investigator" },
+    "refuter":      { "agent": "codex",    "role": "Hypothesis Refuter" },
+    "verifier":     { "agent": "gemini",   "role": "Adversarial Verifier" },
+    "arbiter":      { "agent": "deepseek", "role": "Investigation Arbiter" },
+    "default_mock_scenario": "pass"
+  },
+  "review": {
+    "_comment": "Adversarial PANEL review of an arbitrary target artifact (a document, design, proposal, or diff passed via --target; falls back to --task). Each reviewer cell attacks ONE lens (correctness / completeness / risk); the Review Arbiter then consolidates, deduplicates, ranks by severity, and issues STRONG / NEEDS_REVISION / WEAK. Repo-INDEPENDENT: the full artifact is inlined into every prompt (so even an API-only agent with no file access can review it) and reviewers do not read the code repos; there is no editing step (all calls read-only). A produced synthesis ends REVIEW_COMPLETE (success, exit 0) regardless of the quality verdict; only no-live-agent / INSUFFICIENT_INPUT ends HUMAN_REQUIRED. Agents resolved by `roster` at run start (shift-left around a disabled/exhausted agent). Added 2026-07-09 (Irina).",
+    "max_iterations": 10,
+    "arbitration": { "trigger_after_cycles": 2 },
+    "roster": {
+      "_comment": "Panel + arbiter + reviser. PINNED (Irina 2026-07-09): arbiter=gemini (flash), reviser=deepseek (v4-pro strong reasoner, faithful rewrite). Non-pinned cells fill positionally from the remaining live chain: correctness=codex, completeness=claude_reviewer, risk=claude_sonnet. If gemini/deepseek drop, each pin falls back to a live Claude. Static arbiter stays 'deepseek' (test-safe independent-family default); the pin overrides it at runtime. max_iterations/arbitration/reviser matter mainly for `review --iterate`.",
+      "chain": ["codex", "claude_reviewer", "gemini", "deepseek", "claude_sonnet", "claude_haiku"],
+      "cells": ["reviewer_correctness", "reviewer_completeness", "reviewer_risk", "arbiter", "reviser"],
+      "pinned": { "arbiter": "gemini", "reviser": "deepseek" }
+    },
+    "reviewer_correctness": { "agent": "codex", "role": "Adversarial Reviewer",
+      "lens": "Correctness & internal consistency",
+      "focus": "Attack factual/logical correctness and internal consistency: claims that do not hold, steps that contradict each other or the stated order, definitions that are hand-waved, numbers or assertions stated without support." },
+    "reviewer_completeness": { "agent": "claude_reviewer", "role": "Adversarial Reviewer",
+      "lens": "Completeness & gaps",
+      "focus": "Attack completeness: requirements or cases not addressed, missing error/edge/empty paths, unstated assumptions, and decisions the artifact claims to make but actually defers." },
+    "reviewer_risk": { "agent": "gemini", "role": "Adversarial Reviewer",
+      "lens": "Risk, failure modes & defensibility",
+      "focus": "Attack adversarially: failure modes, race/ordering/security/consistency holes, scaling risks, and every claim a hostile domain expert would poke — flag weak or undefended assertions and where the author would get stuck." },
+    "arbiter": { "agent": "deepseek", "role": "Review Arbiter" },
+    "reviser": { "agent": "deepseek", "role": "Review Reviser",
+      "_comment": "Used ONLY by `review --iterate`: applies the arbiter's must-fix and returns the revised text (parse=False — its output IS the new artifact). deepseek v4-pro — strong reasoner chosen as a non-Claude reviser (Irina 2026-07-09; pinned in roster)." },
+    "default_mock_scenario": "pass"
+  },
+  "implreview": {
+    "_comment": "Implementation-readiness review of an ARBITRARY artifact (plan/design/proposal via --target, falling back to --task): 6 roles, a 3-stage cyclic gate with back-edges (Irina 2026-07-14). Stage 1 — the Implementation Architect (author; OWNS + revises the artifact) loops with TWO peer reviewers (Advanced Developer + DevOps) until BOTH return FEASIBLE. Stage 2 — the Implementation Tech Lead verifies (NEEDS_REVISION -> back to stage 1). Stage 3 — the Project Manager delivery-gate (NEEDS_REVISION -> back to stage 1). The Arbiter (independent family) breaks a deadlock (same block > trigger_after_cycles) or an explicit ESCALATE, and may APPROVE / order one revision / defer to a human. Read-only: the author returns the revised artifact TEXT (parse=False); nothing edits repo files. A PM/Arbiter APPROVED ends IMPLREVIEW_COMPLETE (success); budget-exhaustion / arbiter-stop ends HUMAN_REQUIRED. implreview-final.md is a CANDIDATE (not auto-adopted). Agents resolved by `roster` at run start (shift-left around a disabled/exhausted agent).",
+    "max_iterations": 5,
+    "arbitration": { "trigger_after_cycles": 2 },
+    "roster": {
+      "_comment": "Explicit per-role assignment (Irina 2026-07-14): author + both peer reviewers are Claude Opus at MAX reasoning effort (claude_author / claude_reviewer / claude_devops, all MAX_THINKING_TOKENS=31999) — three DISTINCT opus agents because one agent cannot fill two roster cells. verifier PINNED to codex (Tech Lead), gating PINNED to deepseek (Project Manager), arbiter PINNED to gemini. Each pin falls back to the next live same-family Claude on exhaustion (shift-left). DIVERGENCE: the dataplane copy pins gating=deepseek; the phs-rs copy pins gating=mistral (independent 4th family).",
+      "chain": ["claude_author", "claude_reviewer", "claude_devops", "codex", "deepseek", "gemini", "claude_sonnet", "claude_haiku"],
+      "cells": ["author", "dev_reviewer", "devops_reviewer", "verifier", "gating", "arbiter"],
+      "pinned": { "author": "claude_author", "dev_reviewer": "claude_reviewer", "devops_reviewer": "claude_devops", "verifier": "codex", "gating": "deepseek", "arbiter": "gemini" }
+    },
+    "author":          { "agent": "claude_author",   "role": "Implementation Architect" },
+    "dev_reviewer":    { "agent": "claude_reviewer", "role": "Advanced Developer Reviewer" },
+    "devops_reviewer": { "agent": "claude_devops",   "role": "DevOps Reviewer" },
+    "verifier":        { "agent": "codex",           "role": "Implementation Tech Lead" },
+    "gating":          { "agent": "deepseek",        "role": "Project Manager Gate" },
+    "arbiter":         { "agent": "gemini",          "role": "Implementation Review Arbiter" },
+    "default_mock_scenario": "pass"
+  }
+}

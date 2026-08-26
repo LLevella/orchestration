@@ -1,0 +1,19 @@
+{
+  "name": "pass",
+  "_comment": "Happy path: three adversarial lenses each return findings with a severity verdict; the Review Arbiter consolidates them and returns NEEDS_REVISION. A completed synthesis ends REVIEW_COMPLETE (success, exit 0) regardless of the quality verdict. The step ids are review.reviewer_<lens> and review.arbiter.",
+  "responses": {
+    "review.reviewer_correctness": [
+      "## Review Verdict\nMINOR_CONCERNS\n\n### Lens\n- Correctness & internal consistency\n\n### Findings\n- **Severity:** minor — **Where:** (mock) Section 2 — **Problem:** claim X is asserted without support. **Hard question:** what evidence backs X? **Fix:** cite the source or soften the claim.\n\n### Strengths (within this lens)\n- (mock) Definitions are internally consistent.\n"
+    ],
+    "review.reviewer_completeness": [
+      "## Review Verdict\nMAJOR_CONCERNS\n\n### Lens\n- Completeness & gaps\n\n### Findings\n- **Severity:** major — **Where:** (mock) flow — **Problem:** the empty-result case is not handled. **Hard question:** what does the user see when search returns nothing? **Fix:** add a NO_RESULTS path.\n\n### Strengths (within this lens)\n- (mock) Happy path is complete.\n"
+    ],
+    "review.reviewer_risk": [
+      "## Review Verdict\nMINOR_CONCERNS\n\n### Lens\n- Risk, failure modes & defensibility\n\n### Findings\n- **Severity:** minor — **Where:** (mock) caching — **Problem:** cache TTL unbounded; stale-read risk under load. **Hard question:** what bounds staleness? **Fix:** bound TTL + revalidate at commit.\n\n### Strengths (within this lens)\n- (mock) Clear trust boundary.\n"
+    ],
+    "review.arbiter": [
+      "## Review Arbiter Verdict\nNEEDS_REVISION\n\n### Top Issues (ranked)\n1. major — Add empty-result handling (raised by: completeness). Fix in the artifact: add a NO_RESULTS path.\n2. minor — Support or soften claim X (raised by: correctness).\n\n### Must-Fix vs Nice-to-Have\n- Must-fix: empty-result handling.\n- Nice-to-have: bound cache TTL.\n\n### Strengths To Keep\n- (mock) Clear source-of-truth boundary.\n\n### Dropped (nitpicks / not real)\n- none\n"
+    ]
+  },
+  "default": {}
+}

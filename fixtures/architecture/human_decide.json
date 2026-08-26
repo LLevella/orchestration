@@ -1,0 +1,23 @@
+{
+  "name": "human_decide",
+  "_comment": "Architect<->Developer never converges (5x NEEDS_REVISION) -> Arbiter, which returns NEEDS_HUMAN_DECISION. Without --human-answer the run PAUSES (AWAITING_HUMAN). With --human-answer the decision is fed back as a binding ruling; the Developer then returns FEASIBLE and the Tech Lead READY_FOR_HUMAN_REVIEW -> PASS. Exercises escalate_after_cycles=5, the arbiter pause, and the human-answer injection.",
+  "responses": {
+    "arch.dev_review": [
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 1).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 2).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 3).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 4).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 5).\n",
+      "## Implementation Feasibility Verdict\nFEASIBLE\n\n## Blocking Implementation Gaps\n- None; the human ruling bounded the footprint.\n"
+    ],
+    "arch.arbiter": [
+      "### Arbitration Verdict\nNEEDS_HUMAN_DECISION\n\n### Final Note for Human\n- Scope/footprint tradeoff; a human must decide.\n"
+    ],
+    "arch.tech_lead": [
+      "## Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\n## Control Review\n- Sound and proportionate.\n"
+    ]
+  },
+  "default": {
+    "arch.author": "# Architecture Proposal: Contested Feature (draft)\n\n## Proposed Design\nA component X whose buffer footprint the Developer says must be bounded.\n"
+  }
+}

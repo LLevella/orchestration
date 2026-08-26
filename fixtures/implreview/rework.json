@@ -1,0 +1,18 @@
+{
+  "name": "rework",
+  "_comment": "Round 1: developer NEEDS_REVISION (devops FEASIBLE) -> back to stage 1 (revise). Round 2: both FEASIBLE -> Tech Lead READY -> PM APPROVED -> IMPLREVIEW_COMPLETE at iteration 2. Exercises the back-edge to the author.",
+  "responses": {
+    "impl.author": [
+      "# Revised artifact (round 1)\nFirst hardening pass.",
+      "# Revised artifact (round 2)\nAddressed the developer's blocking feedback."
+    ],
+    "impl.dev_review": [
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\nThe data-flow between the classifier and the resolver is under-specified.",
+      "## Implementation Feasibility Verdict\nFEASIBLE\n\nThe data-flow is now concrete; buildable within scope."
+    ],
+    "impl.devops_review": ["## Operational Feasibility Verdict\nFEASIBLE\n\nInfra and rollout are fine."],
+    "impl.verifier": ["## Implementation Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\nCoheres as a whole."],
+    "impl.gating": ["## Delivery Gate Verdict\nAPPROVED\n\nDeliverable and defensible."]
+  },
+  "default": {}
+}

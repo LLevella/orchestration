@@ -1,0 +1,22 @@
+# Run history is process output, not source. Never committed.
+runs/
+
+# Task working area: briefs, run logs, captured evidence (~90M of host logs).
+tmp/
+
+# Legacy task working area (autobind-port task drafts and logs).
+.autobind-port/
+
+# Python bytecode / test caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Stray process output
+*.err
+*.out
+*.log
+
+# Local secrets: API keys are read from the environment, never committed.
+.env
+*.env

@@ -1,0 +1,12 @@
+{
+  "name": "stuck",
+  "_comment": "Refine loop that never reaches STRONG: the arbiter keeps returning NEEDS_REVISION and the reviser cannot satisfy it. With `review --iterate --max-iterations 2` the budget is spent → HUMAN_REQUIRED (a review only fails on non-convergence/infra, mirroring arch not reaching FEASIBLE). Run WITHOUT --iterate this ends REVIEW_COMPLETE after round 1 (one-shot critique). Each reviewer/arbiter entry is reused (single element) across rounds.",
+  "responses": {
+    "review.reviewer_correctness": ["## Review Verdict\nMAJOR_CONCERNS\n\n### Findings\n- (mock) still wrong.\n"],
+    "review.reviewer_completeness": ["## Review Verdict\nMAJOR_CONCERNS\n\n### Findings\n- (mock) still incomplete.\n"],
+    "review.reviewer_risk": ["## Review Verdict\nMAJOR_CONCERNS\n\n### Findings\n- (mock) still risky.\n"],
+    "review.arbiter": ["## Review Arbiter Verdict\nNEEDS_REVISION\n\n### Must-Fix\n- (mock) unresolved issue.\n"],
+    "review.reviser": ["# (mock) attempted revision that does not satisfy the arbiter\n"]
+  },
+  "default": {}
+}

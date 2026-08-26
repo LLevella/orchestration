@@ -1,0 +1,1347 @@
+"""The deterministic state machines for both workflows.
+
+Control flow lives here; agent reasoning lives in the role files. Both loops are
+hard-bounded (10 + 10 iterations), fire arbitration on repeated disagreement
+(> trigger_after_cycles), and terminate with PASS / READY_FOR_HUMAN_REVIEW or
+HUMAN_REQUIRED. Every step is logged via the transcript before any decision.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+import time
+
+from .adapters import OK, AgentResponse
+from .guard import GuardViolation
+from .roster import Roster, is_unavailable, is_transient
+from .verdicts import ROLE_VERDICTS, extract_verdict
+
+PASS = "PASS"
+READY = "READY_FOR_HUMAN_REVIEW"
+HUMAN_REQUIRED = "HUMAN_REQUIRED"
+# The arbiter could not decide on its own: the run is PAUSED for a human decision and
+# can be resumed with `--human-answer` (which is fed back into the loop as a ruling).
+# Not a success; distinct from the old terminal HUMAN_REQUIRED because it is resumable.
+AWAITING_HUMAN = "AWAITING_HUMAN"
+# Backoff before the single same-agent retry on a transient blip (see call()).
+TRANSIENT_RETRY_BACKOFF_S = 3.0
+# Investigation workflow terminal states (both are clean conclusions, exit 0).
+ROOT_CAUSE_ESTABLISHED = "ROOT_CAUSE_ESTABLISHED"
+NO_DEFECT_FOUND = "NO_DEFECT_FOUND"
+# Review workflow terminal state: a synthesized review was produced (exit 0). The
+# arbiter's STRONG/NEEDS_REVISION/WEAK verdict is the DELIVERABLE (a judgment about
+# the artifact), not the run's success/failure — a completed synthesis is success
+# regardless of that judgment; only an infra failure / INSUFFICIENT_INPUT is HUMAN_REQUIRED.
+REVIEW_COMPLETE = "REVIEW_COMPLETE"
+# Implreview workflow terminal state: the artifact passed all three gates (the
+# Project Manager delivery-gate, or the Arbiter, returned APPROVED). Like REVIEW,
+# a completed pass is success (exit 0); budget-exhaustion / arbiter-stop is HUMAN_REQUIRED.
+IMPLREVIEW_COMPLETE = "IMPLREVIEW_COMPLETE"
+
+# Terminal statuses that count as success (exit code 0). orchestrate.py imports
+# this so the exit-code mapping never drifts from the engine's vocabulary.
+SUCCESS_STATUSES = {PASS, READY, ROOT_CAUSE_ESTABLISHED, NO_DEFECT_FOUND,
+                    REVIEW_COMPLETE, IMPLREVIEW_COMPLETE}
+
+# Arbiter verdicts that mean "stop, a human must decide". Shared by the dev,
+# architecture, and investigation arbitration loops (the investigation arbiter
+# uses exactly the same two terminal-stop tokens).
+ARB_STOP = {"NEEDS_HUMAN_DECISION", "INSUFFICIENT_INFORMATION", None}
+# Investigation-arbiter verdicts that mean "the hypothesis is proven, stop with
+# success". Everything not in this set and not in ARB_STOP reopens the loop.
+INV_ARB_SUCCESS = {"HYPOTHESIS_STANDS", "INVESTIGATOR_IS_RIGHT"}
+
+# How many times to re-prompt an agent that returned a successful response with
+# no machine-readable verdict header before falling through to the fail-safe.
+# A headless agent that did the work but ended on a prose summary (e.g. the
+# investigator opening with "Investigation complete." instead of the
+# "## Investigator Verdict" block) is nudged to re-emit the verdict rather than
+# wasting the whole step to HUMAN_REQUIRED. 0 disables repair (old behaviour).
+VERDICT_REPAIR_ATTEMPTS = 2
+
+
+class AgentError(Exception):
+    pass
+
+
+def _norm_hash(text: str) -> str:
+    return hashlib.sha256(re.sub(r"\s+", " ", (text or "").strip().lower()).encode()).hexdigest()
+
+
+def _sum_opt(a, b):
+    """Sum two Optional[int] token counts; None only if both are None."""
+    if a is None and b is None:
+        return None
+    return (a or 0) + (b or 0)
+
+
+def _merge_usage(a, b):
+    """Element-wise sum of two normalized usage dicts (input/output/total)."""
+    if not a and not b:
+        return None
+    a, b = a or {}, b or {}
+    return {k: _sum_opt(a.get(k), b.get(k)) for k in set(a) | set(b)}
+
+
+class Engine:
+    def __init__(self, ctx, workflow: str):
+        self.ctx = ctx
+        self.workflow = workflow
+        self.roster = None
+
+    # ---- roster (availability-resolved role assignment) --------------
+    def _apply_roster_assignment(self):
+        """Recompute the cell->agent assignment for the current liveness and write
+        it onto the workflow's per-cell spec blocks (so every call() resolves
+        `spec["agent"]` from the live roster). Returns the assignment dict."""
+        wf = self.ctx.workflows[self.workflow]
+        assignment = self.roster.assign()
+        for cell, agent in assignment.items():
+            blk = wf.get(cell)
+            if isinstance(blk, dict):
+                blk["_cell"] = cell
+                blk["agent"] = agent
+        return assignment
+
+    def _setup_roster(self):
+        """Build the roster from the workflow's `roster` block and resolve the
+        opening assignment. No-op (static per-cell `agent` bindings stand) when the
+        workflow declares no roster."""
+        wf = self.ctx.workflows[self.workflow]
+        self.roster = Roster(wf, self.ctx.adapters)
+        if not self.roster.enabled:
+            return
+        assignment = self._apply_roster_assignment()
+        lines = [f"  {c:22s} -> {assignment.get(c) or 'NONE (no live agent)'}"
+                 for c in self.roster.cells]
+        self.ctx.tx.md("\n#### Roster — availability-resolved assignment\n"
+                       "```\n" + "\n".join(lines) + "\n```\n")
+        self.ctx.tx.event(kind="roster_assignment", workflow=self.workflow,
+                          assignment=assignment, exhausted=sorted(self.roster.exhausted))
+
+    # ---- core step caller --------------------------------------------
+    def call(self, step_id, spec, user_prompt, *, phase, iteration,
+             allow_edit=False, parse=True):
+        ctx = self.ctx
+        role = spec["role"]
+        cell = spec.get("_cell")
+
+        # Resume: if this exact step (step_id, phase, iteration) already completed
+        # in the run we are resuming from, replay its journaled result instead of
+        # re-invoking the agent (regardless of which agent produced it). For the
+        # editing developer step this is also why we do NOT re-edit — its changes
+        # are already persisted in the working tree. The first un-journaled step
+        # and everything after it runs live.
+        cached = ctx.resume_lookup(step_id, phase, iteration)
+        if cached is not None:
+            resp = AgentResponse(cached["agent"], OK, text=cached["text"],
+                                 role=role, duration=0.0)
+            verdict = cached["verdict"] if parse else None
+            ctx.tx.step(step_id, cached["agent"], role,
+                        "(resumed — system prompt not re-sent)",
+                        "(resumed — user prompt not re-sent)",
+                        resp, verdict, iteration, phase)
+            return resp, verdict
+
+        # Shift-left loop: on an EXHAUSTED-class failure for a roster-managed cell,
+        # drop the agent, recompute the assignment, and retry with the next live
+        # agent in the chain. Terminates because each failure marks one more agent
+        # exhausted -> the chain eventually yields None -> a clear AgentError.
+        retried_transient: set[str] = set()
+        while True:
+            agent = spec["agent"]
+            if agent is None:
+                raise AgentError(
+                    f"no live agent for role '{role}'"
+                    + (f" (roster cell '{cell}')" if cell else "")
+                    + " — the fallback chain is exhausted.")
+            system = ctx.load_role(role, spec.get("wrapper"))
+            before = ctx.guard.snapshot() if not allow_edit else None
+            resp = ctx.adapters[agent].run(system, user_prompt,
+                                           allow_edit=allow_edit, step_id=step_id)
+            resp.role = role
+            # Transient server/network blip (HTTP 503, overloaded, socket hang up):
+            # retry the SAME agent ONCE (after a short backoff) before evicting it, so a
+            # momentary failure does not drop a preferred agent (e.g. gemini tech_lead)
+            # for the whole run. Persistent unavailability (quota/auth/billing/spending
+            # cap) is NOT retried — it falls straight through to shift-left below.
+            if (resp.status != OK and agent not in retried_transient
+                    and is_transient(resp.error or resp.text)):
+                retried_transient.add(agent)
+                self.ctx.tx.event(kind="agent_retry", step=step_id, cell=cell, agent=agent,
+                                  detail=(resp.error or resp.text or "")[:200])
+                self.ctx.tx.md(f"\n> ↻ `{agent}` transient failure on **{cell or role}** "
+                               f"→ retrying same agent once after "
+                               f"{TRANSIENT_RETRY_BACKOFF_S:g}s.\n")
+                time.sleep(TRANSIENT_RETRY_BACKOFF_S)
+                continue
+            if self._shift_if_exhausted(step_id, cell, agent, resp):
+                continue  # retry with the shifted agent
+            # Verdict repair: a successful step that must be parsed but carries no
+            # known verdict token is nudged to re-emit it (bounded) BEFORE finalize,
+            # so the read-only guard's before/after bracket still spans every
+            # invocation. Without this a complete analysis that merely forgot the
+            # verdict header wastes the whole step to HUMAN_REQUIRED.
+            if (parse and resp.status == OK and role in ROLE_VERDICTS
+                    and extract_verdict(role, resp.text) is None):
+                resp = self._repair_verdict(step_id, agent, role, system,
+                                            user_prompt, resp, allow_edit)
+            return self._finalize(step_id, agent, role, system, user_prompt,
+                                   resp, before, parse, iteration, phase, allow_edit)
+
+    def _shift_if_exhausted(self, step_id, cell, agent, resp) -> bool:
+        """If `resp` is an EXHAUSTED-class failure for a roster-managed cell, drop
+        the agent, recompute the assignment, and report whether a DIFFERENT live
+        agent is now in the cell (so the caller should retry)."""
+        if resp.status == OK or not cell or not (self.roster and self.roster.enabled):
+            return False
+        if not is_unavailable(resp.error or resp.text):
+            return False
+        self.roster.mark_exhausted(agent)
+        self._apply_roster_assignment()
+        nxt = self.ctx.workflows[self.workflow].get(cell, {}).get("agent")
+        self.ctx.tx.event(kind="roster_shift", step=step_id, cell=cell, exhausted=agent,
+                          next_agent=nxt, detail=(resp.error or resp.text or "")[:200])
+        self.ctx.tx.md(f"\n> ⤵ `{agent}` exhausted on cell **{cell}** → shift-left to "
+                       f"`{nxt or 'NONE'}`, retrying.\n")
+        return bool(nxt and nxt != agent)
+
+    def _finalize(self, step_id, agent, role, system, user_prompt, resp, before,
+                  parse, iteration, phase, allow_edit):
+        """Guard-check a read-only step, log it, and return (resp, verdict)."""
+        ctx = self.ctx
+        if not allow_edit:
+            after = ctx.guard.snapshot()
+            try:
+                ctx.guard.assert_unchanged(before, after, agent, step_id)
+            except GuardViolation as e:
+                ctx.tx.event(kind="guard_violation", step=step_id, detail=str(e))
+                resp.error = (resp.error + "\n" + str(e)).strip()
+                verdict = extract_verdict(role, resp.text) if parse else None
+                ctx.tx.step(step_id, agent, role, system, user_prompt, resp, verdict, iteration, phase)
+                raise
+        verdict = extract_verdict(role, resp.text) if parse else None
+        ctx.tx.step(step_id, agent, role, system, user_prompt, resp, verdict, iteration, phase)
+        if resp.status != OK:
+            raise AgentError(f"agent '{agent}' ({role}) returned {resp.status}: "
+                             f"{resp.error or 'no detail'}")
+        return resp, verdict
+
+    def _repair_verdict(self, step_id, agent, role, system, user_prompt, resp, allow_edit):
+        """`resp` succeeded but carries no parseable verdict. Re-prompt the SAME
+        agent (bounded by VERDICT_REPAIR_ATTEMPTS) to re-emit ONLY its verdict
+        block, then append it to the original text so the analysis is preserved
+        AND the verdict parses. Returns the (mutated) resp; if every attempt
+        fails, returns it unchanged so _finalize fail-safes as before.
+
+        Called between the live invocation and _finalize, so the read-only guard
+        still brackets these extra invocations (no edit can slip through)."""
+        spec = ROLE_VERDICTS.get(role)
+        if not spec or VERDICT_REPAIR_ATTEMPTS <= 0:
+            return resp
+        header, tokens = spec
+        for attempt in range(1, VERDICT_REPAIR_ATTEMPTS + 1):
+            self.ctx.tx.event(kind="verdict_repair", step=step_id, agent=agent,
+                              role=role, attempt=attempt)
+            repair_prompt = (
+                "STOP — your previous reply is missing the required machine-readable "
+                "verdict, so the orchestrator cannot process it and the entire step "
+                "will be wasted.\n\n"
+                "Reply with your role's output block and NOTHING before it. Its FIRST "
+                f"line must be exactly:\n## {header}\n"
+                "and the very next line must be EXACTLY ONE of these tokens, verbatim, "
+                "alone on the line:\n"
+                f"  {', '.join(tokens)}\n\n"
+                "Then continue with the rest of your role's required sections. Do NOT "
+                "open with a meta-summary (e.g. \"Investigation complete\") — the "
+                "verdict header comes first. Re-answer the ORIGINAL TASK below, using "
+                "the analysis/work you already did this session.\n\n"
+                "===== ORIGINAL TASK =====\n"
+                + (user_prompt or "")[:20000]
+                + "\n\n----- YOUR PREVIOUS REPLY (may be empty; reproduce its substance) -----\n"
+                + (resp.text or "")[:8000]
+            )
+            rresp = self.ctx.adapters[agent].run(system, repair_prompt,
+                                                 allow_edit=allow_edit, step_id=step_id)
+            if rresp.status == OK and extract_verdict(role, rresp.text):
+                resp.text = ((resp.text or "").rstrip()
+                             + f"\n\n----- verdict repair (attempt {attempt}) -----\n"
+                             + rresp.text)
+                resp.duration = (resp.duration or 0.0) + (rresp.duration or 0.0)
+                resp.usage = _merge_usage(resp.usage, rresp.usage)
+                resp.cost_usd = _sum_opt(resp.cost_usd, rresp.cost_usd)
+                self.ctx.tx.md(f"\n> ♻ verdict-repair on **{step_id}** ({role}) "
+                               f"succeeded on attempt {attempt}.\n")
+                return resp
+        self.ctx.tx.md(f"\n> ⚠ verdict-repair on **{step_id}** ({role}) exhausted "
+                       f"{VERDICT_REPAIR_ATTEMPTS} attempt(s); fail-safe to human.\n")
+        return resp
+
+    def _finish(self, status, reason):
+        return self.ctx.tx.finish(status, reason)
+
+    # ---- public entrypoint -------------------------------------------
+    def run(self, task, arch_ref=None, target=None, iterate=False, max_iters=None):
+        try:
+            self._setup_roster()
+            if self.workflow == "architecture":
+                return self._run_architecture(task)
+            if self.workflow == "investigation":
+                return self._run_investigation(task)
+            if self.workflow == "review":
+                return self._run_review(task, target, iterate, max_iters)
+            if self.workflow == "implreview":
+                return self._run_implreview(task, target, max_iters)
+            return self._run_development(task, arch_ref)
+        except (AgentError, GuardViolation) as e:
+            return self._finish(HUMAN_REQUIRED, f"Aborted: {e}")
+        except Exception as e:  # noqa: BLE001 - never leave a run without a STATUS
+            import traceback
+            self.ctx.tx.event(kind="error", error=f"{type(e).__name__}: {e}",
+                              traceback=traceback.format_exc())
+            return self._finish(HUMAN_REQUIRED,
+                                f"Aborted by unexpected error: {type(e).__name__}: {e} "
+                                "(see events.jsonl for traceback).")
+
+    # ================= ARCHITECTURE ===================================
+    # Chain (developer-centric, two escalation tiers):
+    #   Architect (author) authors the proposal; the Developer (Developer Verifier)
+    #   reviews EVERY draft as the primary implementability gate. The Developer's
+    #   FEASIBLE is the only way to PASS. On an Architect<->Developer deadlock the
+    #   Tech Lead is called to arbitrate (tier 1); on an Architect<->Tech-Lead
+    #   deadlock the Arbiter is called (tier 2).
+    def _arch_author_prompt(self, task, ctx_docs, draft, review, ruling=None, ruling_by=None):
+        p = [f"## Task\n{task}", f"## Existing architecture docs (context)\n{ctx_docs}"]
+        if draft:
+            p.append(f"## Your previous draft\n{draft}")
+        if review:
+            p.append(f"## Developer review to address\n{review}\n\n"
+                     "Apply what you agree with; document disagreements under '## Disagreements'.")
+        if ruling:
+            p.append(f"## {ruling_by or 'Arbiter'} ruling (binding — apply the smallest safe action)\n{ruling}")
+        if not draft:
+            p.append("Produce the first architecture proposal draft.")
+        return "\n\n".join(p)
+
+    def _arch_devreview_prompt(self, task, draft):
+        return (f"## Task (the stated scope you must build within)\n{task}\n\n"
+                f"## Architecture proposal you will have to implement\n{draft}\n\n"
+                "You are the developer who will BUILD this next — this is the DEVELOPER REVIEW of "
+                "the architecture, and you are the primary reviewer. Run your implementation-"
+                "feasibility check per your role: is it buildable within the stated scope and a "
+                "single dev run, are the interfaces/boundaries/tests clear, does it hide a "
+                "migration / API-break / infra / concurrency / runtime-safety cost (e.g. "
+                "fixed-size buffers, DPDK mbuf private-area budget), and will you be forced to "
+                "invent decisions later? You are READ-ONLY: do not edit any file. You may block on "
+                "implementability/scope/testability but must not author or redesign the "
+                "architecture. Return your exact output format ending in a verdict "
+                "(FEASIBLE / NEEDS_REVISION / HUMAN_REQUIRED).")
+
+    def _arch_techlead_prompt(self, task, draft, dev_review, disagreements):
+        return (f"## Task\n{task}\n\n## Architecture proposal under dispute\n{draft}\n\n"
+                f"## Developer review (the implementer's blocking feedback)\n{dev_review}\n\n"
+                f"## Architect <-> Developer disagreement history\n{''.join(disagreements)}\n\n"
+                "The Architect (Codex) and the Developer (the implementer) cannot resolve their "
+                "dispute. Act as Tech Lead and ARBITRATE it: weigh proportionality and delivery "
+                "reality, decide whose position holds (or a middle path), and issue a concrete, "
+                "binding ruling the Architect must apply. Return your verdict: "
+                "READY_FOR_HUMAN_REVIEW (your ruling stands — proceed) / DEVELOPER_NEEDS_FIX / "
+                "ARCHITECT_REVIEW_NEEDS_REVISION (ruling for the Architect to apply) / "
+                "ESCALATE_TO_HUMAN (you cannot arbitrate — defer to the Arbiter).")
+
+    def _arbiter_prompt(self, task, draft, review, disagreements):
+        return (f"## Original task\n{task}\n\n## Current architecture draft\n{draft}\n\n"
+                f"## Latest feedback\n{review}\n\n"
+                f"## Disagreement history (Architect <-> Developer <-> Tech Lead)\n{''.join(disagreements)}\n\n"
+                "The Architect (Codex) and the Tech Lead (Gemini) cannot resolve the dispute even "
+                "after Tech-Lead arbitration. Arbitrate per your role and return your verdict.")
+
+    def _arch_devreview(self, task, draft, phase, i):
+        """Developer review of the architecture (the primary gate). Returns (verdict, text);
+        verdict is FEASIBLE / NEEDS_REVISION / HUMAN_REQUIRED / None."""
+        wf = self.ctx.workflows["architecture"]
+        dv, dvv = self.call("arch.dev_review", wf["developer_verifier"],
+                            self._arch_devreview_prompt(task, draft),
+                            phase=phase, iteration=i)
+        return dvv, dv.text
+
+    def _run_architecture(self, task):
+        """Unified control flow (Irina 2026-08-13):
+          • Architect↔Developer loop; on Developer FEASIBLE → Tech-Lead review.
+          • `escalate_after_cycles` consecutive Developer NEEDS_REVISION → Arbiter.
+          • Tech-Lead READY_FOR_HUMAN_REVIEW → PASS (hand to the human).
+          • Tech-Lead does NOT approve → back into the Architect↔Developer loop with the
+            ruling; `techlead_reject_before_arbiter` cumulative non-approvals → Arbiter.
+          • Arbiter issues a binding ruling → the loop reopens; if it cannot decide the run
+            PAUSES (AWAITING_HUMAN) and resumes via `--human-answer`, fed back as a ruling.
+        """
+        wf = self.ctx.workflows["architecture"]
+        author, tech_lead = wf["author"], wf["tech_lead"]
+        maxit = wf["max_iterations"]
+        dev_esc = wf.get("escalate_after_cycles", wf["arbitration"]["trigger_after_cycles"])
+        tl_esc = wf.get("techlead_reject_before_arbiter", dev_esc)
+        ctx_docs = self.ctx.read_existing_arch()
+
+        draft = last_review = None
+        disagreements = []
+        ruling = ruling_by = None            # a pending binding ruling for the author to apply
+        human_answer = self.ctx.human_answer  # set only when resuming a paused run
+        nr_streak = 0                        # consecutive Developer NEEDS_REVISION
+        tl_rejects = 0                       # cumulative Tech-Lead non-approvals
+
+        for i in range(1, maxit + 1):
+            # -- Architect writes (applying any pending Tech-Lead/Arbiter/Human ruling) --
+            ap = self._arch_author_prompt(task, ctx_docs, draft, last_review,
+                                          ruling=ruling, ruling_by=ruling_by)
+            aresp, _ = self.call("arch.author", author, ap, phase="architecture",
+                                 iteration=i, parse=False)
+            draft = aresp.text
+            self.ctx.tx.artifact(f"architecture-draft-{i:02d}.md", draft)
+            ruling = ruling_by = None
+
+            # -- Developer review: the primary implementability gate --
+            dvv, dvtext = self._arch_devreview(task, draft, "architecture", i)
+            last_review = dvtext
+
+            if dvv == "FEASIBLE":
+                nr_streak = 0
+                # -- Tech-Lead control review --
+                tl, tlv = self.call("arch.tech_lead", tech_lead,
+                                    self._arch_techlead_control_prompt(task, draft, dvtext),
+                                    phase="techlead", iteration=i)
+                if tlv == "READY_FOR_HUMAN_REVIEW":
+                    self.ctx.tx.artifact("architecture-final.md", draft)
+                    return self._finish(PASS, f"Developer FEASIBLE + Tech-Lead "
+                                        f"READY_FOR_HUMAN_REVIEW at iteration {i} → ready for human review.")
+                tl_rejects += 1
+                disagreements.append(f"### Tech-Lead review {i} (Tech Lead: {tlv})\n{tl.text}\n")
+                self.ctx.tx.disagreements("\n".join(disagreements))
+                if tlv == "ESCALATE_TO_HUMAN" or tl_rejects >= tl_esc:
+                    self.ctx.tx.md(f"\n> Tech-Lead did not approve (x{tl_rejects}/{tl_esc}"
+                                   f"{', ESCALATE' if tlv == 'ESCALATE_TO_HUMAN' else ''}) → Arbiter.\n")
+                    kind, payload = self._arch_arbiter_step(task, draft, tl.text,
+                                                            disagreements, human_answer, i)
+                    if kind != "ruling":
+                        return payload
+                    ruling, ruling_by, human_answer = payload, "Arbiter", None
+                    nr_streak = tl_rejects = 0
+                    continue
+                # Not approved, but below the arbiter threshold → reopen the Architect↔Developer loop.
+                self.ctx.tx.md(f"\n> Tech-Lead not approved ({tlv}, x{tl_rejects}/{tl_esc}) "
+                               f"→ back to Architect↔Developer.\n")
+                ruling, ruling_by = tl.text, "Tech Lead"
+                continue
+
+            # -- Developer NEEDS_REVISION / HUMAN_REQUIRED --
+            nr_streak += 1
+            disagreements.append(f"### Architecture iteration {i} (Developer: {dvv})\n{dvtext}\n")
+            self.ctx.tx.disagreements("\n".join(disagreements))
+            if dvv == HUMAN_REQUIRED or nr_streak >= dev_esc:
+                self.ctx.tx.md(f"\n> Architect⇄Developer did not converge "
+                               f"(NEEDS_REVISION x{nr_streak}/{dev_esc}) → Arbiter.\n")
+                kind, payload = self._arch_arbiter_step(task, draft, dvtext,
+                                                        disagreements, human_answer, i)
+                if kind != "ruling":
+                    return payload
+                ruling, ruling_by, human_answer = payload, "Arbiter", None
+                nr_streak = tl_rejects = 0
+                continue
+            # else: the author revises per the developer review on the next iteration.
+
+        # Overall safety cap reached without PASS → one last arbiter, then the human.
+        kind, payload = self._arch_arbiter_step(task, draft, last_review or "",
+                                                disagreements, human_answer, maxit)
+        if kind != "ruling":
+            return payload
+        return self._pause_for_human(task, draft,
+                                     "Iteration budget exhausted after the arbiter's ruling; "
+                                     "a human should take it from here.", disagreements)
+
+    def _arch_techlead_control_prompt(self, task, draft, dev_review):
+        return (f"## Task\n{task}\n\n"
+                f"## Architecture proposal (Developer-Verifier already returned FEASIBLE)\n{draft}\n\n"
+                f"## Developer-Verifier feasibility review\n{dev_review}\n\n"
+                "This is the FINAL Tech-Lead control review before the proposal passes. Approve "
+                "(READY_FOR_HUMAN_REVIEW) ONLY if it is architecturally sound, complete, and "
+                "proportionate; otherwise return DEVELOPER_NEEDS_FIX / ARCHITECT_REVIEW_NEEDS_REVISION "
+                "with specific blockers, or ESCALATE_TO_HUMAN. Return your exact Tech Lead verdict format.")
+
+    def _arch_arbiter_step(self, task, draft, last_review, disagreements, human_answer, i):
+        """One Arbiter adjudication (Irina 2026-08-13). Returns (kind, payload):
+          ("ruling", text)  -> a binding ruling (from the Arbiter, or from the human on resume);
+                               the caller reopens the Architect↔Developer loop with it.
+          ("human",  result)-> the Arbiter could not decide and no human answer is available: the
+                               run is PAUSED (AWAITING_HUMAN); return `result` as-is.
+        FEASIBLE (the only PASS) is reached back in the main loop, never here."""
+        arbiter = self.ctx.workflows["architecture"]["arbiter"]
+        ares, averdict = self.call("arch.arbiter", arbiter,
+                                   self._arbiter_prompt(task, draft, last_review, disagreements),
+                                   phase="arbitration", iteration=i)
+        if averdict not in ARB_STOP:
+            return ("ruling", ares.text)          # the Arbiter decided → reopen the loop
+        # The Arbiter cannot decide on its own.
+        if human_answer:
+            self.ctx.tx.md("\n> Arbiter deferred to a human; applying the provided --human-answer.\n")
+            return ("ruling", f"## Human decision (binding operational ruling)\n{human_answer}")
+        return ("human", self._pause_for_human(task, draft, ares.text, disagreements))
+
+    def _pause_for_human(self, task, draft, arbiter_note, disagreements):
+        """Pause the run for a human decision (the Arbiter could not resolve it alone). Persist the
+        question + the current draft and finish with AWAITING_HUMAN. Resume with
+        `orchestrate.py resume <run_id> --human-answer "<decision>"`; the answer is fed back into
+        the loop as a binding ruling (see _arch_arbiter_step)."""
+        q = ("# Human decision needed — run PAUSED\n\n"
+             "The arbiter could not resolve the dispute on its own. Provide a decision and resume:\n\n"
+             "    python3 orchestrate.py resume <run_id> --human-answer \"<your decision>\"\n\n"
+             "(or `--human-answer @path/to/answer.md`). The answer is fed back into the loop as a "
+             "binding ruling.\n\n"
+             f"## Arbiter's note\n{arbiter_note}\n\n"
+             f"## Current draft under dispute\n{draft}\n\n"
+             f"## Disagreement history\n{''.join(disagreements)}\n")
+        self.ctx.tx.artifact("HUMAN_QUESTION.md", q)
+        self.ctx.tx.md("\n> ⏸ Arbiter deferred to a human → PAUSED (AWAITING_HUMAN). "
+                       "Resume with `--human-answer`.\n")
+        return self._finish(AWAITING_HUMAN,
+                            "Arbiter deferred to a human decision — run PAUSED. Resume with "
+                            "`resume <run_id> --human-answer \"...\"` to continue.")
+
+    # ================= DEVELOPMENT ====================================
+    _SCOPE_FENCE = (
+        "## Scope discipline (mandatory)\n"
+        "- Do ONLY what THIS task asks. Do not implement other phases, future work, or "
+        "unrelated improvements, even if you notice them.\n"
+        "- Touch ONLY the files this task requires. Do not edit files belonging to a "
+        "different phase/task and do not refactor unrelated modules.\n"
+        "- If finishing the task appears to need out-of-scope changes (another phase's "
+        "files, a new dependency, an architecture change), STOP and report it in your "
+        "summary rather than doing it; raise BLOCKED_BY_ARCHITECTURE_QUESTION if it is an "
+        "architecture decision.\n"
+        "- Any out-of-scope or unrelated edit will be rejected in review and wastes a cycle."
+    )
+
+    def _materialize_arch(self, arch_ref):
+        """Persist the approved architecture ONCE to the run's artifacts and return its
+        absolute path, so the Developer + arch/tech-lead reviewers READ it on demand
+        (a pointer) instead of carrying the full text re-inlined on every iteration.
+        Returns None when no architecture was supplied."""
+        if not arch_ref or not arch_ref.strip():
+            return None
+        self.ctx.tx.artifact("approved-architecture.md", arch_ref)
+        return str((self.ctx.tx.dir / "artifacts" / "approved-architecture.md").resolve())
+
+    def _dev_prompt(self, task, arch_path, instruction, i, arbitration=False):
+        arch = (f"Read it at: `{arch_path}` — read the sections your change touches. It is "
+                "intentionally NOT inlined here (context economy); open the file."
+                if arch_path else "(none provided)")
+        p = [f"## Task\n{task}",
+             self.ctx.repo_scope_prompt(),
+             f"## Approved architecture\n{arch}",
+             "## Build/test cadence\nRun the FULL build/test suite as a CLOSURE check once you "
+             "believe the change is complete — NOT on every intermediate iteration; iterate with "
+             "focused, cheap checks meanwhile. (Reviewers read the diff each cycle regardless.)"]
+        if instruction:
+            label = "Arbiter ruling — apply only the smallest safe valid fix" if arbitration \
+                else "Review feedback — fix only valid blockers, nothing else"
+            p.append(f"## {label}\n{instruction}")
+        else:
+            p.append("Implement the task with minimal, focused, production-quality changes.")
+        p.append(self._SCOPE_FENCE)
+        return "\n\n".join(p)
+
+    def _review_prompt(self, task, diff, dev_summary, kind, arch_path=None):
+        lens = ("as Code Reviewer (correctness, regressions, tests, security)"
+                if kind == "code" else
+                "as Architect (architecture impact, boundaries, ADR need)")
+        arch_block = ""
+        if kind == "arch" and arch_path:
+            arch_block = (f"## Approved architecture (read at `{arch_path}`)\nJudge the diff "
+                          "against it — open the sections the change touches.\n\n")
+        return (f"## Task\n{task}\n\n## {self.ctx.repo_scope_line()}\n\n"
+                f"{arch_block}"
+                f"## Developer summary\n{dev_summary}\n\n"
+                f"## Implementation diff\n```diff\n{diff}\n```\n\n"
+                f"Review ONLY the diff above {lens}. The diff already contains exactly the repos in "
+                "scope; a change WITHIN a listed READ-ONLY repo is a blocking scope violation. Do "
+                "NOT inspect or flag anything outside the listed repos — other repositories or "
+                "directories that coexist in the workspace belong to separate work and are not your "
+                "concern. Return your exact output format with a verdict.")
+
+    def _techlead_prompt(self, task, diff, dev_summary, arch_review, arch_path=None):
+        arch_block = f"## Approved architecture (read at `{arch_path}`)\n\n" if arch_path else ""
+        return (f"## Task\n{task}\n\n## {self.ctx.repo_scope_line()}\n\n"
+                f"{arch_block}"
+                f"## Developer summary\n{dev_summary}\n\n"
+                f"## Implementation diff\n```diff\n{diff}\n```\n\n"
+                f"## Architect (Codex) review\n{arch_review}\n\n"
+                "Review the Architect review per your Tech Lead role. Validate proportionality, "
+                "confirm/downgrade blockers, catch missed risks, and return your verdict.")
+
+    def _dev_arbiter_prompt(self, task, diff, dev_summary, disagreements):
+        return (f"## Original task\n{task}\n\n## Current diff\n```diff\n{diff}\n```\n\n"
+                f"## Developer summary\n{dev_summary}\n\n"
+                f"## Disagreement history\n{''.join(disagreements)}\n\n"
+                "Developer, reviewers, and Tech Lead are stuck. Arbitrate and return your verdict.")
+
+    def _arch_question_prompt(self, task, dev_summary, diff, arch_path=None):
+        arch_block = f"## Approved architecture (read at `{arch_path}`)\n\n" if arch_path else ""
+        return (f"## Task\n{task}\n\n## {self.ctx.repo_scope_line()}\n\n"
+                f"{arch_block}"
+                f"## The developer hit an architecture question / blocker mid-implementation\n{dev_summary}\n\n"
+                f"## Work in progress (diff so far)\n```diff\n{diff}\n```\n\n"
+                "Answer the developer's architecture question as the System Architect: give a clear, "
+                "actionable decision and the minimal next step so implementation can continue. Resolve it "
+                "within the approved architecture and the task scope; do not expand scope. If it genuinely "
+                "cannot be decided at the architecture level, return ESCALATE_TO_TECH_LEAD. Return your "
+                "exact Architect verdict format.")
+
+    def _dev_staged_review(self, task, diff, dev_summary, phase, i, arch_path=None):
+        """Staged review gate (Irina 2026-08-17, code-review REMOVED): the Architect reviews the
+        implementation FIRST (there is no Claude peer code-review stage); only when the Architect passes
+        does the Tech Lead (final gate) run. A failing Architect stage short-circuits, so the Tech Lead
+        never sees code the Architect already rejected. Returns (verdict, feedback, gate)."""
+        wf = self.ctx.workflows["development"]
+        # Stage 1 — Architect review (first gate; the code-review stage was removed).
+        ar, arv = self.call("dev.architect", wf["architect"],
+                            self._review_prompt(task, diff, dev_summary, "arch", arch_path),
+                            phase=phase, iteration=i)
+        if arv not in ("PASS", "NOT_APPLICABLE", "ESCALATE_TO_TECH_LEAD"):
+            return "DEVELOPER_NEEDS_FIX", (
+                f"## Architect verdict: {arv}\n{ar.text}\n\n"
+                "Fix these architecture blockers; the Tech Lead final review runs once the Architect passes."), "architect"
+        # Stage 2 — Tech Lead (final gate, only after the Architect passes).
+        tl, tlv = self.call("dev.tech_lead", wf["tech_lead"],
+                            self._techlead_prompt(task, diff, dev_summary, ar.text, arch_path),
+                            phase=phase, iteration=i)
+        if tlv == READY:
+            return READY, tl.text, "tech-lead"
+        if tlv == "ESCALATE_TO_HUMAN" or tlv is None:
+            return "ESCALATE_TO_HUMAN", tl.text, "tech-lead"
+        return "DEVELOPER_NEEDS_FIX", f"## Tech Lead verdict: {tlv}\n{tl.text}", "tech-lead"
+
+    def _dev_break_deadlock(self, task, diff, dev_summary, disagreements, i):
+        """Call the Arbiter ONCE to break a genuine deadlock (only reached when the same blocker
+        repeats > trigger_after_cycles, or an architecture question keeps recurring). Returns a
+        developer instruction carrying the arbiter's ruling, or None if a human must decide."""
+        wf = self.ctx.workflows["development"]
+        ares, averdict = self.call("dev.arbiter", wf["arbiter"],
+                                   self._dev_arbiter_prompt(task, diff, dev_summary, disagreements),
+                                   phase="arbitration", iteration=i)
+        disagreements.append(f"### Arbiter ruling at iteration {i} ({averdict})\n{ares.text}\n")
+        self.ctx.tx.disagreements("\n".join(disagreements))
+        if averdict in ARB_STOP:
+            return None
+        return ("## Arbiter ruling (deadlock broken) — apply only the smallest safe valid fix, "
+                f"then continue\n{ares.text}")
+
+    def _run_development(self, task, arch_ref):
+        """Dev workflow (Irina 2026-06-22): one loop of developer + STAGED review
+        (code-review → architect → tech-lead). The Architect answers any architecture question the
+        developer raises mid-implementation. The Arbiter is called ONLY to break a genuine deadlock
+        (the same blocker repeats > trigger_after_cycles, or a recurring question)."""
+        wf = self.ctx.workflows["development"]
+        developer, architect = wf["developer"], wf["architect"]
+        maxit = wf["max_iterations"] + wf["arbitration"]["max_iterations"]
+        trig = wf["arbitration"]["trigger_after_cycles"]
+        arch_path = self._materialize_arch(arch_ref)
+
+        self._dev_repeat, self._dev_last_sig = 0, None
+        instruction, disagreements, diff, dev_summary = None, [], "", ""
+
+        for i in range(1, maxit + 1):
+            dresp, dverdict = self.call("dev.developer", developer,
+                                        self._dev_prompt(task, arch_path, instruction, i),
+                                        phase="development", iteration=i, allow_edit=True)
+            dev_summary = dresp.text
+            diff = self.ctx.capture_diff()
+            self.ctx.tx.artifact(f"diff-{i:02d}.patch", diff)
+
+            if dverdict == "BLOCKED_BY_ARCHITECTURE_QUESTION":
+                # Architecture question mid-implementation -> the ARCHITECT answers (not the arbiter).
+                instruction, stop = self._dev_answer_arch_question(
+                    task, architect, dev_summary, diff, arch_path, disagreements, i, trig)
+                self._dev_repeat, self._dev_last_sig = 0, None
+                if stop:
+                    return self._finish(HUMAN_REQUIRED,
+                                        f"Architecture question needs a human decision (iteration {i}).")
+                continue
+
+            # Staged review: code-review -> architect -> tech-lead.
+            verdict, feedback, gate = self._dev_staged_review(task, diff, dev_summary, "development", i, arch_path)
+            if verdict == READY:
+                return self._finish(READY, f"Tech Lead returned READY_FOR_HUMAN_REVIEW at iteration {i}.")
+            if verdict == "ESCALATE_TO_HUMAN":
+                return self._finish(HUMAN_REQUIRED, f"Tech Lead escalated to human at iteration {i}.")
+
+            instruction, stop = self._dev_handle_blocker(gate, feedback, task, diff, dev_summary, disagreements, i, trig)
+            if stop:
+                return self._finish(HUMAN_REQUIRED, f"Arbiter stopped the run at iteration {i} (human decision needed).")
+
+        return self._finish(HUMAN_REQUIRED, f"Development did not reach READY within {maxit} iterations.")
+
+    def _dev_handle_blocker(self, gate, feedback, task, diff, dev_summary, disagreements, i, trig):
+        """Record a gate's NEEDS_FIX, track repetition, and return the next developer instruction —
+        or, on a genuine deadlock (the same blocker repeats > trig), call the Arbiter ONCE to break it.
+        Returns (instruction, stop); stop=True => a human must decide."""
+        disagreements.append(f"### Dev i{i} ({gate} NEEDS_FIX)\n{feedback}\n")
+        self.ctx.tx.disagreements("\n".join(disagreements))
+        sig = (gate, _norm_hash(feedback))
+        self._dev_repeat = self._dev_repeat + 1 if sig == self._dev_last_sig else 1
+        self._dev_last_sig = sig
+        if self._dev_repeat > trig:
+            self.ctx.tx.md(f"\n> Same {gate} blocker repeated {self._dev_repeat}× at iteration {i} → arbiter breaks the deadlock.\n")
+            ruling = self._dev_break_deadlock(task, diff, dev_summary, disagreements, i)
+            if ruling is None:
+                return None, True
+            self._dev_repeat, self._dev_last_sig = 0, None
+            return ruling, False
+        return feedback, False
+
+    def _dev_answer_arch_question(self, task, architect, dev_summary, diff, arch_path, disagreements, i, trig):
+        """The Architect answers a developer architecture question. Returns (instruction, stop):
+        instruction = guidance to feed the developer next (the Architect's answer, or the Arbiter's
+        ruling if it had to break a deadlock); stop = True means a human must decide."""
+        aresp, av = self.call("dev.architect", architect,
+                              self._arch_question_prompt(task, dev_summary, diff, arch_path),
+                              phase="development", iteration=i)
+        disagreements.append(
+            f"### Dev i{i}: architecture question → Architect\n{dev_summary}\n--- answer ---\n{aresp.text}\n")
+        self.ctx.tx.disagreements("\n".join(disagreements))
+        # Architect cannot settle it, or the same question keeps recurring -> arbiter (deadlock).
+        recurring = sum(1 for d in disagreements if "architecture question" in d) > trig
+        if av == "ESCALATE_TO_TECH_LEAD" or recurring:
+            self.ctx.tx.md(f"\n> Architecture question unresolved at iteration {i} → arbiter.\n")
+            ruling = self._dev_break_deadlock(task, diff, dev_summary, disagreements, i)
+            return ruling, (ruling is None)
+        return (f"## Architect's answer to your architecture question\n{aresp.text}\n\n"
+                "Apply this guidance and continue the implementation."), False
+
+    # ================= INVESTIGATION ==================================
+    # Investigator (Claude) reads all five repos on their named branches, reads
+    # the named servers' logs, and produces falsifiable hypotheses. The Refuter
+    # (Gemini) attacks every cycle; only when it cannot break a hypothesis does
+    # the independent Verifier (Codex) — the final gate — attack it from a fresh
+    # angle. The Arbiter is invoked only on escalation/deadlock. The
+    # Investigator is the ONLY role that may edit/build, and only in the writable
+    # repos; that scope is fenced by the prompt and surfaced to the skeptics via
+    # the captured debug diff (a read-only-repo change is a disqualifying edit).
+    _INV_FINAL_ARTIFACT = "root-cause-final.md"
+    _INV_SCOPE_FENCE = (
+        "## Investigation scope discipline (mandatory)\n"
+        "- Read and analyse ALL five repos on the branches named in the problem; presume NO "
+        "project innocent and excuse none — including a contract mismatch BETWEEN repos.\n"
+        "- You may EDIT and BUILD only in the WRITABLE repos (dataplane-phs-ng, dataplane-sdk), "
+        "and only as temporary, clearly-marked debug instrumentation to confirm or kill a "
+        "hypothesis. Never edit a read-only repo (MCD4_Lite, ncc-core, idu/sdk-s8000), not even "
+        "'to test' — any such change is a disqualifying scope violation.\n"
+        "- Your deliverable is a PROVEN, falsifiable hypothesis, not a shipped fix and not a "
+        "timing workaround (no sleep/After=/PartOf=/retry to paper over a race — name the "
+        "code-level race: threads/lcores, shared state, missing lock or ordering).\n"
+        "- Every hypothesis needs a complete cited chain (symptom log → repo/path:line on the "
+        "stated branch → mechanism → falsifier) and a per-repo guilty/cleared verdict."
+    )
+
+    def _inv_investigator_prompt(self, task, instruction, arbitration=False):
+        p = [f"## Problem description (names the affected repos, their branches, and the "
+             f"hosts/servers — NOT the log paths, which you derive from the repos)\n{task}",
+             self.ctx.repo_scope_prompt()]
+        if instruction:
+            label = ("Arbiter ruling — act on the smallest evidence-gathering step it names"
+                     if arbitration else
+                     "Skeptic feedback to address — fix the chain, gather the demanded evidence, "
+                     "or DROP the broken hypothesis and propose a better one")
+            p.append(f"## {label}\n{instruction}")
+        else:
+            p.append("Verify each repo is on its named branch; derive each service's log "
+                     "location / journald unit from the repos themselves (service unit files, "
+                     "logging/ConfD config, code, devtools collectors) — the problem gives you "
+                     "the hosts, not the paths; then read those logs on the named hosts, "
+                     "correlate them with the code, and produce your ranked, falsifiable "
+                     "root-cause hypotheses.")
+        p.append(self._INV_SCOPE_FENCE)
+        return "\n\n".join(p)
+
+    def _inv_refuter_prompt(self, task, hypothesis, debug_diff, is_no_defect=False):
+        if is_no_defect:
+            task_line = (
+                "The Investigator concluded **NO_DEFECT_FOUND** — that the writable repos "
+                "(dataplane-phs-ng / dataplane-sdk) contain no defect and the cause is upstream / "
+                "out of scope. Your job is to REFUTE that conclusion: prove a defect DOES exist in "
+                "a writable repo, or that it was CLEARED on inadequate evidence — e.g. a cumulative "
+                "counter read as a single snapshot instead of a delta over the symptom window, a "
+                "drop/branch never instrumented, an upstream cause asserted without a time-correlated "
+                "delta, or a writable repo exonerated by 'looks right'. REFUTED = you found such a "
+                "gap (the no-defect does NOT hold). NOT_REFUTED = you genuinely tried and the "
+                "no-defect conclusion stands. Return REFUTED / NOT_REFUTED / INSUFFICIENT_EVIDENCE.")
+        else:
+            task_line = (
+                "Attack every hypothesis per your role. Re-verify each cited repo/path:line on the "
+                "stated branch and re-check both biases (home-team excuse / read-only scapegoat). "
+                "Flag any edit to a read-only repo as a disqualifying scope violation. Return your "
+                "exact output format ending in REFUTED / NOT_REFUTED / INSUFFICIENT_EVIDENCE.")
+        header = ("Investigator's NO-DEFECT conclusion to refute" if is_no_defect
+                  else "Investigator's hypotheses and evidence chain")
+        return (f"## Problem description\n{task}\n\n## {self.ctx.repo_scope_line()}\n\n"
+                f"## {header}\n{hypothesis}\n\n"
+                f"## Investigator's debug changes so far (must be confined to the writable repos)\n"
+                f"```diff\n{debug_diff}\n```\n\n" + task_line)
+
+    def _inv_verifier_prompt(self, task, hypothesis, debug_diff, refuter_text, is_no_defect=False):
+        if is_no_defect:
+            head = "NO-DEFECT conclusion the Refuter could not refute"
+            task_line = (
+                "Independently try to prove a DEFECT EXISTS in a writable repo, or that the "
+                "no-defect rests on a blind spot the Investigator and Refuter share (a cumulative "
+                "counter not delta-correlated, an uninstrumented path, an upstream claim without a "
+                "time-aligned delta). CONFIRMED = no defect genuinely holds; REFUTED = a defect "
+                "exists / it was cleared prematurely; NEEDS_ARBITRATION = honest impasse.")
+        else:
+            head = "Hypothesis the Refuter could not break"
+            task_line = (
+                "Independently re-derive the chain from the raw evidence, then run an attack the "
+                "Refuter did not, hunting the blind spot the Investigator and Refuter may share. "
+                "Return CONFIRMED / REFUTED / NEEDS_ARBITRATION.")
+        return (f"## Problem description\n{task}\n\n## {self.ctx.repo_scope_line()}\n\n"
+                f"## {head}\n{hypothesis}\n\n"
+                f"## The Refuter's attacks — do NOT merely repeat them; find a new one\n"
+                f"{refuter_text}\n\n"
+                f"## Investigator's debug changes (must be confined to the writable repos)\n"
+                f"```diff\n{debug_diff}\n```\n\n" + task_line)
+
+    def _inv_arbiter_prompt(self, task, hypothesis, disagreements):
+        return (f"## Problem description\n{task}\n\n## {self.ctx.repo_scope_line()}\n\n"
+                f"## Current hypothesis under dispute\n{hypothesis}\n\n"
+                f"## Disagreement history (Investigator <-> Refuter <-> Verifier)\n"
+                f"{''.join(disagreements)}\n\n"
+                "The investigation loop cannot converge. Rule on whether this root-cause "
+                "hypothesis stands on the evidence, per your role, and return your verdict.")
+
+    def _inv_investigator_terminal(self, iverdict, i, phase):
+        """Map a non-actionable Investigator verdict to a terminal status, or None
+        to continue to the adversarial gate. NOTE: NO_DEFECT_FOUND is NOT terminal
+        here — it must still pass the Refuter/Verifier (who try to prove a defect
+        DOES exist) before it can finish, so the Investigator cannot quietly clear
+        the writable repos and bypass the team. Only 'blocked' and unparseable
+        verdicts fail safe to a human."""
+        if iverdict == "BLOCKED_NEED_MORE_DATA":
+            return self._finish(HUMAN_REQUIRED,
+                                f"Investigator is BLOCKED_NEED_MORE_DATA at {phase} iteration {i} "
+                                "(needs server access / missing logs / an unbuildable branch).")
+        if iverdict == ROOT_CAUSE_ESTABLISHED:
+            # The Investigator self-declared the final verdict — but it cannot
+            # self-certify. Route it through the Refuter/Verifier gate exactly as a
+            # HYPOTHESIS_READY_FOR_REFUTATION handoff; the engine alone owns the
+            # ROOT_CAUSE_ESTABLISHED terminal, and only after the skeptics agree.
+            self.ctx.tx.md(f"\n> Investigator emitted ROOT_CAUSE_ESTABLISHED at {phase} "
+                           f"iteration {i}; it cannot self-certify — routing the hypothesis "
+                           "through the Refuter/Verifier gate.\n")
+            return None
+        if iverdict not in ("HYPOTHESIS_READY_FOR_REFUTATION", NO_DEFECT_FOUND):
+            return self._finish(HUMAN_REQUIRED,
+                                f"Investigator returned no parseable verdict at {phase} "
+                                f"iteration {i} (fail-safe to human).")
+        return None
+
+    def _inv_gate(self, task, hypothesis, debug_diff, phase, i, is_no_defect=False):
+        """Run the refutation gate. Returns (verdict, feedback, ran_verifier).
+
+        The Refuter (Gemini) attacks every cycle. The Adversarial Verifier (Codex)
+        is the SECOND, independent skeptic and runs ONLY once the Refuter returns
+        NOT_REFUTED — mirroring the dev workflow's Tech-Lead final gate, so the
+        Verifier never reacts to a hypothesis the Refuter already broke.
+
+        When is_no_defect, the gate is attacking a NO_DEFECT_FOUND conclusion: the
+        skeptics try to prove a defect DOES exist. A CONFIRMED here means the
+        no-defect genuinely holds; a REFUTED means a defect was found / the writable
+        repos were cleared prematurely, and the Investigator must keep digging.
+        """
+        wf = self.ctx.workflows["investigation"]
+        rr, rv = self.call("inv.refuter", wf["refuter"],
+                           self._inv_refuter_prompt(task, hypothesis, debug_diff, is_no_defect),
+                           phase=phase, iteration=i)
+        if rv != "NOT_REFUTED":
+            # REFUTED / INSUFFICIENT_EVIDENCE / unparseable(None) -> back to the Investigator.
+            return rv, rr.text, False
+        vr, vv = self.call("inv.verifier", wf["verifier"],
+                           self._inv_verifier_prompt(task, hypothesis, debug_diff, rr.text, is_no_defect),
+                           phase=phase, iteration=i)
+        return vv, vr.text, True
+
+    def _run_investigation(self, task):
+        wf = self.ctx.workflows["investigation"]
+        investigator = wf["investigator"]
+        maxit = wf["max_iterations"]
+        trig = wf["arbitration"]["trigger_after_cycles"]
+
+        instruction = None
+        last_sig = None
+        repeat = 0
+        disagreements = []
+        hypothesis = ""
+        debug_diff = ""
+        is_no_defect = False
+
+        for i in range(1, maxit + 1):
+            iresp, iverdict = self.call("inv.investigator", investigator,
+                                        self._inv_investigator_prompt(task, instruction),
+                                        phase="investigation", iteration=i, allow_edit=True)
+            hypothesis = iresp.text
+            debug_diff = self.ctx.capture_diff()
+            self.ctx.tx.artifact(f"debug-diff-{i:02d}.patch", debug_diff)
+            term = self._inv_investigator_terminal(iverdict, i, "investigation")
+            if term:
+                return term
+            is_no_defect = (iverdict == NO_DEFECT_FOUND)
+
+            verdict, feedback, ran_v = self._inv_gate(task, hypothesis, debug_diff,
+                                                      "investigation", i, is_no_defect)
+            if verdict == "CONFIRMED":
+                if is_no_defect:
+                    return self._finish(NO_DEFECT_FOUND,
+                                        f"NO_DEFECT_FOUND validated — Refuter and Verifier could "
+                                        f"not show a defect in the writable repos at iteration {i}.")
+                self.ctx.tx.artifact(self._INV_FINAL_ARTIFACT, hypothesis)
+                return self._finish(ROOT_CAUSE_ESTABLISHED,
+                                    f"Verifier CONFIRMED the hypothesis at iteration {i}.")
+            if verdict == "NEEDS_ARBITRATION":
+                self.ctx.tx.md(f"\n> Verifier escalated at iteration {i} → arbitration.\n")
+                disagreements.append(
+                    f"### Investigation iteration {i} (Verifier: NEEDS_ARBITRATION)\n{feedback}\n")
+                break
+            if verdict is None:
+                who = "Verifier" if ran_v else "Refuter"
+                return self._finish(HUMAN_REQUIRED,
+                                    f"{who} returned no parseable verdict at iteration {i}.")
+
+            # REFUTED / INSUFFICIENT_EVIDENCE -> the Investigator reworks the hypothesis.
+            instruction = feedback
+            gate = "Verifier" if ran_v else "Refuter"
+            sig = (verdict, _norm_hash(feedback))
+            repeat = repeat + 1 if sig == last_sig else 1
+            last_sig = sig
+            disagreements.append(f"### Investigation iteration {i} ({gate}: {verdict})\n{feedback}\n")
+            if repeat > trig:
+                self.ctx.tx.md(f"\n> Same refutation repeated {repeat}× → triggering arbitration.\n")
+                break
+        else:
+            self.ctx.tx.md("\n> Investigation loop exhausted without a confirmed root cause "
+                           "→ arbitration.\n")
+
+        self.ctx.tx.disagreements("\n".join(disagreements))
+        return self._inv_arbitration(task, hypothesis, debug_diff, disagreements, is_no_defect)
+
+    def _inv_arbitration(self, task, hypothesis, debug_diff, disagreements, is_no_defect=False):
+        wf = self.ctx.workflows["investigation"]
+        investigator, arbiter = wf["investigator"], wf["arbiter"]
+        arbmax = wf["arbitration"]["max_iterations"]
+
+        def _confirmed_finish(j, who):
+            # On a confirmed conclusion, the terminal status depends on what was
+            # being judged: a validated no-defect ends NO_DEFECT_FOUND, a confirmed
+            # defect hypothesis ends ROOT_CAUSE_ESTABLISHED.
+            if is_no_defect:
+                return self._finish(NO_DEFECT_FOUND,
+                                    f"NO_DEFECT_FOUND validated during arbitration iteration {j} ({who}).")
+            self.ctx.tx.artifact(self._INV_FINAL_ARTIFACT, hypothesis)
+            return self._finish(ROOT_CAUSE_ESTABLISHED,
+                                f"{who} during arbitration iteration {j}.")
+
+        for j in range(1, arbmax + 1):
+            ares, averdict = self.call("inv.arbiter", arbiter,
+                                       self._inv_arbiter_prompt(task, hypothesis, disagreements),
+                                       phase="arbitration", iteration=j)
+            if averdict in INV_ARB_SUCCESS:
+                return _confirmed_finish(j, f"Arbiter returned {averdict}")
+            if averdict in ARB_STOP:
+                return self._finish(HUMAN_REQUIRED,
+                                    f"Arbiter returned {averdict} at arbitration iteration {j}.")
+
+            # HYPOTHESIS_REFUTED / REFUTER_IS_RIGHT / VERIFIER_IS_RIGHT /
+            # NEEDS_MORE_INVESTIGATION -> the Investigator reworks under the ruling.
+            iresp, iverdict = self.call("inv.investigator", investigator,
+                                        self._inv_investigator_prompt(task, ares.text,
+                                                                      arbitration=True),
+                                        phase="arbitration", iteration=j, allow_edit=True)
+            hypothesis = iresp.text
+            debug_diff = self.ctx.capture_diff()
+            self.ctx.tx.artifact(f"debug-diff-arb-{j:02d}.patch", debug_diff)
+            term = self._inv_investigator_terminal(iverdict, j, "arbitration")
+            if term:
+                return term
+            is_no_defect = (iverdict == NO_DEFECT_FOUND)
+
+            verdict, feedback, ran_v = self._inv_gate(task, hypothesis, debug_diff,
+                                                      "arbitration", j, is_no_defect)
+            gate = "Verifier" if ran_v else "Refuter"
+            disagreements.append(f"### Arbitration iteration {j} ({gate}: {verdict})\n{feedback}\n")
+            self.ctx.tx.disagreements("\n".join(disagreements))
+            if verdict == "CONFIRMED":
+                return _confirmed_finish(j, "Verifier CONFIRMED")
+            if verdict is None:
+                who = "Verifier" if ran_v else "Refuter"
+                return self._finish(HUMAN_REQUIRED,
+                                    f"{who} returned no parseable verdict during arbitration "
+                                    f"iteration {j}.")
+            # NEEDS_ARBITRATION / REFUTED / INSUFFICIENT_EVIDENCE -> loop back to the arbiter.
+
+        return self._finish(HUMAN_REQUIRED,
+                            "Arbitration exhausted without an established root cause.")
+
+    # ================= REVIEW =========================================
+    # Adversarial panel review of an ARBITRARY target artifact (a document, design,
+    # proposal, or diff — passed via --target, falling back to --task). Each reviewer
+    # cell attacks ONE independent lens; the Review Arbiter then consolidates,
+    # deduplicates, ranks by severity, and issues STRONG / NEEDS_REVISION / WEAK.
+    #
+    # Repo-independent by design: the full artifact is INLINED into every prompt (so
+    # even an API-only agent with no file access can review it) and the reviewers do
+    # not read the code repos. There is no editing step, so every call is read-only.
+    # A produced synthesis ends REVIEW_COMPLETE (success); only no-live-agent /
+    # INSUFFICIENT_INPUT ends HUMAN_REQUIRED.
+    _REVIEW_DELIM_OPEN = "-----8<----- ARTIFACT UNDER REVIEW (BEGIN) -----8<-----"
+    _REVIEW_DELIM_CLOSE = "-----8<----- ARTIFACT UNDER REVIEW (END) -----8<-----"
+    _REVIEW_FINAL_ARTIFACT = "review-final.md"
+
+    def _review_reviewer_prompt(self, task, artifact, lens):
+        return (f"## Review context / instructions\n{task}\n\n"
+                f"## Your adversarial lens: {lens['title']}\n{lens['focus']}\n\n"
+                "## Artifact under review\n"
+                "The COMPLETE artifact is inlined below — you already have everything you "
+                "need. Do NOT attempt to open files, browse repos, or call tools; review "
+                "ONLY the text between the delimiters.\n\n"
+                f"{self._REVIEW_DELIM_OPEN}\n{artifact}\n{self._REVIEW_DELIM_CLOSE}\n\n"
+                "Review the artifact ONLY through your assigned lens. Be specific and "
+                "adversarial: cite the exact section/claim, state the problem concretely, and "
+                "give a concrete fix. Prefer fewer REAL findings over padding; do not invent "
+                "problems where the artifact is correct. End with your role's verdict block.")
+
+    def _review_arbiter_prompt(self, task, artifact, reviews):
+        blocks = [f"### Reviewer `{cell}` — lens: {lens['title']} (verdict: {verdict})\n{text}"
+                  for cell, lens, verdict, text in reviews]
+        return (f"## Review context / instructions\n{task}\n\n"
+                "## Artifact under review\n"
+                f"{self._REVIEW_DELIM_OPEN}\n{artifact}\n{self._REVIEW_DELIM_CLOSE}\n\n"
+                f"## Independent reviewer findings ({len(reviews)} lens(es))\n"
+                + "\n\n".join(blocks) + "\n\n"
+                "You are the Review Arbiter. Consolidate and DEDUPLICATE the findings; be "
+                "skeptical of the reviewers too and drop nitpicks (say which and why). RANK the "
+                "surviving issues by severity (most important first). Separate must-fix from "
+                "nice-to-have, note the real strengths worth keeping, and end with your role's "
+                "verdict block.")
+
+    def _review_reviser_prompt(self, task, artifact, synthesis):
+        return (f"## Review context / instructions\n{task}\n\n"
+                "## Current artifact (revise THIS)\n"
+                f"{self._REVIEW_DELIM_OPEN}\n{artifact}\n{self._REVIEW_DELIM_CLOSE}\n\n"
+                f"## Review Arbiter verdict + must-fix to apply\n{synthesis}\n\n"
+                "Apply ONLY the arbiter's must-fix items to the artifact, minimally. Preserve "
+                "everything else verbatim, keep the strengths the arbiter said to keep, do not pad "
+                "or lengthen unnecessarily, and do not change the author's voice. Return the "
+                "COMPLETE revised artifact and NOTHING else — no preamble, no explanation, no "
+                "surrounding code fences.")
+
+    def _review_reviewer_cells(self):
+        """The ordered reviewer cells (config insertion order): every dict-valued key
+        prefixed 'reviewer' that carries an 'agent' slot. The arbiter and the reviser
+        are separate cells, not part of the panel."""
+        wf = self.ctx.workflows["review"]
+        return [(k, v) for k, v in wf.items()
+                if isinstance(v, dict) and "agent" in v and k.startswith("reviewer")]
+
+    def _review_panel(self, task, artifact, i):
+        """Run the reviewer panel once over `artifact`. Returns the list of
+        (cell, lens, verdict, text); skips any lens with no live agent."""
+        reviews = []
+        for cell, spec in self._review_reviewer_cells():
+            if not spec.get("agent"):
+                self.ctx.tx.md(f"\n> ⚠ no live agent for review lens **{cell}** — skipping.\n")
+                continue
+            lens = {"title": spec.get("lens", cell), "focus": spec.get("focus", "")}
+            resp, verdict = self.call(f"review.{cell}", spec,
+                                      self._review_reviewer_prompt(task, artifact, lens),
+                                      phase="review", iteration=i)
+            self.ctx.tx.artifact(f"review-{cell}-{i:02d}.md", resp.text)
+            reviews.append((cell, lens, verdict, resp.text))
+        return reviews
+
+    def _run_review(self, task, target, iterate=False, max_iters=None):
+        """Panel + arbiter over an artifact. One-shot by default (critique only);
+        with `iterate` it becomes a refine loop — a reviser applies the arbiter's
+        must-fix and the panel re-reviews, until the arbiter returns STRONG or the
+        iteration budget is spent. STRONG => REVIEW_COMPLETE (converged). A one-shot
+        run always ends REVIEW_COMPLETE (the critique is the deliverable). In iterate
+        mode, not reaching STRONG (budget spent, deadlock, or no live reviser) ends
+        HUMAN_REQUIRED — mirroring arch/dev/inv, which only converge because a writer
+        sits inside the loop; the reviser is that writer here."""
+        wf = self.ctx.workflows["review"]
+        artifact = (target or task or "").strip()
+        if not artifact:
+            return self._finish(HUMAN_REQUIRED,
+                                "No artifact to review (provide --target or --task).")
+        maxit = (max_iters or wf.get("max_iterations", 10)) if iterate else 1
+        trig = wf.get("arbitration", {}).get("trigger_after_cycles", 2)
+        reviser = wf.get("reviser", {})
+        arbiter = wf.get("arbiter", {})
+        last_hash, repeat, last_verdict = None, 0, None
+
+        for i in range(1, maxit + 1):
+            reviews = self._review_panel(task, artifact, i)
+            if not reviews:
+                return self._finish(HUMAN_REQUIRED,
+                                    "No review lens had a live agent — cannot review.")
+            if not arbiter.get("agent"):
+                return self._finish(HUMAN_REQUIRED,
+                                    "No live arbiter agent to synthesize the review.")
+            ares, averdict = self.call("review.arbiter", arbiter,
+                                       self._review_arbiter_prompt(task, artifact, reviews),
+                                       phase="review", iteration=i)
+            self.ctx.tx.artifact(f"review-synthesis-{i:02d}.md", ares.text)
+            last_verdict = averdict
+            if averdict is None or averdict == "INSUFFICIENT_INPUT":
+                return self._finish(HUMAN_REQUIRED,
+                                    f"Arbiter could not synthesize a review (verdict: {averdict}).")
+            if averdict == "STRONG":
+                if iterate and i > 1:
+                    self.ctx.tx.artifact(self._REVIEW_FINAL_ARTIFACT, artifact)
+                return self._finish(REVIEW_COMPLETE,
+                                    f"Review {'converged — arbiter STRONG' if iterate else 'complete — STRONG'} "
+                                    f"at iteration {i} ({len(reviews)} lens(es)).")
+            if not iterate:
+                return self._finish(REVIEW_COMPLETE,
+                                    f"Review complete — arbiter verdict: {averdict} "
+                                    f"({len(reviews)} lens(es) synthesized).")
+            if i == maxit:
+                break  # iterate budget spent without STRONG
+            # Deadlock: the same synthesis keeps returning -> the reviser is not making progress.
+            h = _norm_hash(ares.text)
+            repeat = repeat + 1 if h == last_hash else 1
+            last_hash = h
+            if repeat > trig:
+                self.ctx.tx.artifact(self._REVIEW_FINAL_ARTIFACT, artifact)
+                return self._finish(HUMAN_REQUIRED,
+                                    f"Review did not converge — the same issues repeated "
+                                    f"{repeat}× by iteration {i} (human needed).")
+            # Revise the artifact (reviser output IS the new artifact) and loop.
+            if not reviser.get("agent"):
+                return self._finish(HUMAN_REQUIRED,
+                                    "No live reviser agent — cannot iterate to STRONG "
+                                    "(run without --iterate for a one-shot critique).")
+            rresp, _ = self.call("review.reviser", reviser,
+                                 self._review_reviser_prompt(task, artifact, ares.text),
+                                 phase="review", iteration=i, parse=False)
+            artifact = (rresp.text or "").strip()
+            self.ctx.tx.artifact(f"review-revised-{i:02d}.md", artifact)
+
+        self.ctx.tx.artifact(self._REVIEW_FINAL_ARTIFACT, artifact)
+        return self._finish(HUMAN_REQUIRED,
+                            f"Review did not reach STRONG within {maxit} iteration(s) "
+                            f"(last verdict: {last_verdict}); best revision saved as "
+                            f"{self._REVIEW_FINAL_ARTIFACT}.")
+
+    # ================= IMPLREVIEW =====================================
+    # Implementation-readiness review of an artifact (a plan/design/proposal):
+    # 6 roles, a 3-stage cyclic gate with back-edges (Irina 2026-07-14).
+    #   Stage 1  Implementation Architect (author — OWNS and revises the artifact) loops
+    #            with TWO peer reviewers — Advanced Developer + DevOps — until BOTH return
+    #            FEASIBLE (converged on implementability).
+    #   Stage 2  Implementation Tech Lead verifies the converged artifact; NEEDS_REVISION
+    #            sends it back to Stage 1 (the author revises).
+    #   Stage 3  Project Manager delivery-gate; NEEDS_REVISION sends it back to Stage 1.
+    #   Arbiter (independent family) breaks a deadlock (the same block repeats > trig) or an
+    #            explicit ESCALATE; it may APPROVE, order one more revision, or defer to a human.
+    # Read-only: the author returns the revised artifact TEXT (parse=False — its output IS
+    # the new artifact); nothing edits repo files. A Project-Manager APPROVED (or Arbiter
+    # APPROVED) ends IMPLREVIEW_COMPLETE; budget-exhaustion / arbiter-stop ends HUMAN_REQUIRED.
+    # The converged artifact is saved as implreview-final.md (a CANDIDATE — not auto-adopted).
+    _IMPL_FINAL_ARTIFACT = "implreview-final.md"
+
+    def _impl_author_prompt(self, task, artifact, feedback, ruling):
+        p = ["## STRICT READ-ONLY MODE\nYou are READ-ONLY. Do NOT open files, run shell "
+             "commands, or modify ANYTHING in the workspace. The complete artifact is inlined "
+             "below — you have everything you need. Your ENTIRE job is to return the revised "
+             "artifact TEXT. Any file edit or command execution is a disqualifying violation "
+             "that aborts the run.",
+             f"## Review context / instructions\n{task}",
+             "## Artifact you OWN and must harden for implementation (revise THIS)\n"
+             f"{self._REVIEW_DELIM_OPEN}\n{artifact}\n{self._REVIEW_DELIM_CLOSE}"]
+        if feedback:
+            p.append("## Reviewer feedback to address\n" + feedback +
+                     "\n\nApply what genuinely improves implementation-readiness; where you "
+                     "disagree, keep the text and justify briefly under a '## Author notes' section "
+                     "at the very end. Do NOT pad or bloat — preserve the author's voice, structure, "
+                     "and every strength.")
+        if ruling:
+            p.append("## Arbiter ruling (binding — apply the smallest change that satisfies it)\n"
+                     + ruling)
+        if not feedback and not ruling:
+            p.append("This is the first pass. Return the artifact ready for implementation review; "
+                     "you may tighten obvious gaps, but do NOT rewrite it wholesale.")
+        p.append("Return the COMPLETE revised artifact and NOTHING else — no preamble, no "
+                 "explanation, no surrounding code fences.")
+        return "\n\n".join(p)
+
+    def _impl_review_prompt(self, task, artifact):
+        return (f"## Review context / instructions\n{task}\n\n"
+                "## Artifact under review (implementation-readiness)\n"
+                "The COMPLETE artifact is inlined below; review ONLY the text between the "
+                "delimiters — do not open files or call tools.\n\n"
+                f"{self._REVIEW_DELIM_OPEN}\n{artifact}\n{self._REVIEW_DELIM_CLOSE}\n\n"
+                "Review it from YOUR chair (see your role). Be specific and adversarial: cite the "
+                "exact section, state each blocker concretely, and say what must change to make it "
+                "implementable/operable within the stated scope and timeline. Prefer few REAL "
+                "blockers over padding; do not invent problems where the artifact is sound. End "
+                "with your role's verdict block.")
+
+    def _impl_verifier_prompt(self, task, artifact, dev_review, ops_review):
+        return (f"## Review context / instructions\n{task}\n\n"
+                "## Artifact (the developer and DevOps peers BOTH returned FEASIBLE)\n"
+                f"{self._REVIEW_DELIM_OPEN}\n{artifact}\n{self._REVIEW_DELIM_CLOSE}\n\n"
+                f"## Advanced Developer review\n{dev_review}\n\n"
+                f"## DevOps review\n{ops_review}\n\n"
+                "You are the Tech Lead — the technical control gate AFTER the developer and DevOps "
+                "peers agreed it is feasible. Confirm the artifact is technically sound, complete, "
+                "and internally consistent as an implementation plan; catch what both peers missed "
+                "and any disproportionate or hand-waved commitment. Return READY_FOR_HUMAN_REVIEW "
+                "(passes to the delivery gate) / NEEDS_REVISION (back to the author) / "
+                "ESCALATE_TO_HUMAN (defer to the arbiter). End with your verdict block.")
+
+    def _impl_gating_prompt(self, task, artifact, verifier_text):
+        return (f"## Review context / instructions\n{task}\n\n"
+                "## Artifact (the Tech Lead passed it as technically ready)\n"
+                f"{self._REVIEW_DELIM_OPEN}\n{artifact}\n{self._REVIEW_DELIM_CLOSE}\n\n"
+                f"## Tech Lead verdict\n{verifier_text}\n\n"
+                "You are the Project Manager delivery gate — the LAST gate before this goes out. "
+                "Judge delivery-readiness for its audience/stakeholder: are scope, timeline, "
+                "dependencies, risks and asks clear, realistic and defensible; is anything "
+                "over-promised, or missing, that would embarrass the team on contact. Return "
+                "APPROVED (ready to ship/send) / NEEDS_REVISION (back to the author) / "
+                "ESCALATE_TO_HUMAN (defer to the arbiter). End with your verdict block.")
+
+    def _impl_arbiter_prompt(self, task, artifact, feedback, disagreements):
+        return (f"## Review context / instructions\n{task}\n\n"
+                "## Artifact under dispute\n"
+                f"{self._REVIEW_DELIM_OPEN}\n{artifact}\n{self._REVIEW_DELIM_CLOSE}\n\n"
+                f"## Latest blocking feedback\n{feedback}\n\n"
+                f"## Disagreement history\n{''.join(disagreements)}\n\n"
+                "The implementation-review loop cannot converge (a gate keeps blocking, or a role "
+                "escalated). Arbitrate independently: decide whether the artifact is good enough to "
+                "ship AS IS (APPROVED), needs one more targeted revision (NEEDS_REVISION — give the "
+                "binding, minimal ruling the author must apply), or genuinely needs a human "
+                "(NEEDS_HUMAN_DECISION / INSUFFICIENT_INFORMATION). End with your verdict block.")
+
+    @staticmethod
+    def _impl_combine(dvv, dvt, ovv, ovt):
+        parts = []
+        if dvv != "FEASIBLE":
+            parts.append(f"### Advanced Developer verdict: {dvv}\n{dvt}")
+        if ovv != "FEASIBLE":
+            parts.append(f"### DevOps verdict: {ovv}\n{ovt}")
+        return "\n\n".join(parts) or "(no blocking feedback captured)"
+
+    def _run_implreview(self, task, target, max_iters=None):
+        wf = self.ctx.workflows["implreview"]
+        artifact = (target or task or "").strip()
+        if not artifact:
+            return self._finish(HUMAN_REQUIRED,
+                                "No artifact to review (provide --target or --task).")
+        maxit = max_iters or wf.get("max_iterations", 5)
+        trig = wf.get("arbitration", {}).get("trigger_after_cycles", 2)
+        author, dev, ops = wf["author"], wf["dev_reviewer"], wf["devops_reviewer"]
+        verifier, gating, arbiter = wf["verifier"], wf["gating"], wf["arbiter"]
+
+        feedback = ruling = None
+        disagreements = []
+        self._impl_repeat, self._impl_last_sig = 0, None
+        draft = artifact
+
+        def _finish_ok(reason):
+            self.ctx.tx.artifact(self._IMPL_FINAL_ARTIFACT, draft)
+            return self._finish(IMPLREVIEW_COMPLETE, reason)
+
+        def handle(stage, fb, i, force_arbiter=False):
+            """Record a block; return (kind, value): revise / ruling / done / stop."""
+            disagreements.append(f"### impl i{i} — {stage} block\n{fb}\n")
+            self.ctx.tx.disagreements("\n".join(disagreements))
+            sig = (stage, _norm_hash(fb))
+            self._impl_repeat = self._impl_repeat + 1 if sig == self._impl_last_sig else 1
+            self._impl_last_sig = sig
+            if not force_arbiter and self._impl_repeat <= trig:
+                return ("revise", fb)
+            self.ctx.tx.md(f"\n> {stage} block "
+                           + ("escalated" if force_arbiter else f"repeated {self._impl_repeat}×")
+                           + f" at iteration {i} → arbiter.\n")
+            ares, av = self.call("impl.arbiter", arbiter,
+                                 self._impl_arbiter_prompt(task, draft, fb, disagreements),
+                                 phase="arbitration", iteration=i)
+            disagreements.append(f"### Arbiter i{i} ({av})\n{ares.text}\n")
+            self.ctx.tx.disagreements("\n".join(disagreements))
+            if av == "APPROVED":
+                return ("done", ares.text)
+            if av in ARB_STOP:
+                return ("stop", f"Arbiter returned {av} at iteration {i}.")
+            self._impl_repeat, self._impl_last_sig = 0, None
+            return ("ruling", ares.text)
+
+        for i in range(1, maxit + 1):
+            def dispatch(kind, val):
+                nonlocal feedback, ruling
+                if kind == "done":
+                    return _finish_ok(f"Arbiter APPROVED at iteration {i}.")
+                if kind == "stop":
+                    return self._finish(HUMAN_REQUIRED, val)
+                if kind == "ruling":
+                    ruling = val
+                else:
+                    feedback = val
+                return None
+
+            # ---- AUTHOR: revise the artifact (its output IS the new artifact) ----
+            aresp, _ = self.call("impl.author", author,
+                                 self._impl_author_prompt(task, draft, feedback, ruling),
+                                 phase="implreview", iteration=i, parse=False)
+            draft = (aresp.text or "").strip()
+            self.ctx.tx.artifact(f"implreview-draft-{i:02d}.md", draft)
+            feedback = ruling = None
+
+            # ---- STAGE 1: developer + devops feasibility (both must be FEASIBLE) ----
+            dv, dvv = self.call("impl.dev_review", dev, self._impl_review_prompt(task, draft),
+                                phase="implreview", iteration=i)
+            self.ctx.tx.artifact(f"implreview-dev-{i:02d}.md", dv.text)
+            ov, ovv = self.call("impl.devops_review", ops, self._impl_review_prompt(task, draft),
+                                phase="implreview", iteration=i)
+            self.ctx.tx.artifact(f"implreview-devops-{i:02d}.md", ov.text)
+            if dvv != "FEASIBLE" or ovv != "FEASIBLE":
+                force = None in (dvv, ovv) or "HUMAN_REQUIRED" in (dvv, ovv)
+                term = dispatch(*handle("stage1", self._impl_combine(dvv, dv.text, ovv, ov.text),
+                                        i, force_arbiter=force))
+                if term:
+                    return term
+                continue
+
+            # ---- STAGE 2: Tech Lead verifier ----
+            vr, vvv = self.call("impl.verifier", verifier,
+                                self._impl_verifier_prompt(task, draft, dv.text, ov.text),
+                                phase="implreview", iteration=i)
+            self.ctx.tx.artifact(f"implreview-verifier-{i:02d}.md", vr.text)
+            if vvv != "READY_FOR_HUMAN_REVIEW":
+                force = vvv in ("ESCALATE_TO_HUMAN", None)
+                term = dispatch(*handle("verifier", vr.text, i, force_arbiter=force))
+                if term:
+                    return term
+                continue
+
+            # ---- STAGE 3: Project Manager delivery gate ----
+            gr, gvv = self.call("impl.gating", gating,
+                                self._impl_gating_prompt(task, draft, vr.text),
+                                phase="implreview", iteration=i)
+            self.ctx.tx.artifact(f"implreview-gating-{i:02d}.md", gr.text)
+            if gvv == "APPROVED":
+                return _finish_ok(f"Project Manager delivery-gate APPROVED at iteration {i}.")
+            force = gvv in ("ESCALATE_TO_HUMAN", None)
+            term = dispatch(*handle("gating", gr.text, i, force_arbiter=force))
+            if term:
+                return term
+
+        self.ctx.tx.artifact(self._IMPL_FINAL_ARTIFACT, draft)
+        return self._finish(HUMAN_REQUIRED,
+                            f"Implementation review did not pass all gates within {maxit} "
+                            f"iteration(s); best draft saved as {self._IMPL_FINAL_ARTIFACT}.")

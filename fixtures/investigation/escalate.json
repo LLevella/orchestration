@@ -1,0 +1,13 @@
+{
+  "name": "escalate",
+  "_comment": "Deadlock: the Refuter REFUTES the same chain every cycle (identical feedback). After >2 repeats arbitration fires; the Investigation Arbiter (DeepSeek) returns NEEDS_HUMAN_DECISION -> HUMAN_REQUIRED. The Verifier is never reached because the Refuter never passes.",
+  "responses": {
+    "inv.arbiter": [
+      "## Arbitration Verdict\nNEEDS_HUMAN_DECISION\n\n## Dispute Summary\n- Investigator keeps blaming dataplane-sdk; Refuter says the cited line never executes and the evidence points at a read-only repo the team cannot fix.\n\n## Minimal Next Action\n- Ownership/access decision for Irina: the load-bearing log lives on a server the run cannot reach.\n\n## Note for Irina\n- The chain cannot be closed without read access to the NCC host logs.\n"
+    ]
+  },
+  "default": {
+    "inv.investigator": "## Investigator Verdict\nHYPOTHESIS_READY_FOR_REFUTATION\n\n## Hypotheses (ranked)\n### H1 — mock cause in dataplane-sdk (Confidence: Low)\n- Code: dataplane-sdk/mock.c:1\n- Mechanism: unproven.\n- Falsifier: the cited line never executes on this path.\n",
+    "inv.refuter": "## Refutation Verdict\nREFUTED\n\n## Where It Failed\n- dataplane-sdk/mock.c:1 is not on the failing code path; the falsifier fires. Same break as the previous cycle: the mechanism is still unproven.\n"
+  }
+}

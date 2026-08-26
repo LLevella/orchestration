@@ -1,0 +1,13 @@
+{
+  "name": "stuck",
+  "_comment": "Developer repeats the SAME NEEDS_REVISION every round; after trigger_after_cycles the same block routes to the Arbiter, which returns NEEDS_HUMAN_DECISION -> HUMAN_REQUIRED. Exercises the deadlock -> arbiter -> stop path.",
+  "responses": {
+    "impl.author": ["# Revised artifact\nUnchanged in the way the developer keeps flagging."],
+    "impl.dev_review": ["## Implementation Feasibility Verdict\nNEEDS_REVISION\n\nThe visa-data source is still undefined and blocks phase 3."],
+    "impl.devops_review": ["## Operational Feasibility Verdict\nFEASIBLE\n\nOps side is fine."],
+    "impl.verifier": ["## Implementation Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW"],
+    "impl.gating": ["## Delivery Gate Verdict\nAPPROVED"],
+    "impl.arbiter": ["## Implementation Arbiter Verdict\nNEEDS_HUMAN_DECISION\n\nThe visa-data sourcing is a real product/vendor decision the owner must make."]
+  },
+  "default": {}
+}

@@ -1,0 +1,16 @@
+{
+  "name": "pass",
+  "_comment": "Happy path: Codex (Architect) drafts; the Claude Developer review (arch.dev_review) returns FEASIBLE -> the Tech-Lead CONTROL gate (arch.tech_lead) returns READY_FOR_HUMAN_REVIEW -> PASS. Arbiter not invoked (no deadlock).",
+  "responses": {
+    "arch.author": [
+      "# Architecture Proposal: Mock Feature (draft 1)\n\n## Context & Task\nMock authoring step.\n\n## Proposed Design\nA minimal component X with a single boundary, explicit startup error handling, clear interfaces, and a concrete unit-test contract.\n\n## Open Decisions (ADR candidates)\n- None significant.\n"
+    ],
+    "arch.dev_review": [
+      "## Implementation Feasibility Verdict\nFEASIBLE\n\n## Feasibility Checklist\n- Implementable within stated scope: Yes\n- Fits one dev run: Yes\n- Interfaces & boundaries clear: Yes\n- Tests implied clearly: Yes\n- Hidden migration/API-break/infra/concurrency/runtime-safety cost: None\n- Hidden assumptions developer must invent: None\n\n## Blocking Implementation Gaps\n- None.\n"
+    ],
+    "arch.tech_lead": [
+      "## Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\n## Control Review\n- Architecturally sound, complete, and proportionate. Approved at the final Tech-Lead control gate.\n"
+    ]
+  },
+  "default": {}
+}

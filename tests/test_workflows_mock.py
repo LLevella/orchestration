@@ -1,0 +1,155 @@
+"""Integration tests: run each workflow end-to-end through the mock path.
+
+Exercises the real engine state machines (the developer-centric arch chain, the dev
+chain, the investigation loop) via scripted fixtures — no AI creds, no network. Asserts
+the final terminal status + exit code (0 success / 2 HUMAN_REQUIRED). Copy-agnostic:
+mock adapters ignore the arbiter model, so this passes for both DeepSeek and Mistral copies.
+
+Each run is cleaned up (its runs/<id>/ dir is removed).
+"""
+import re
+import shutil
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+ORCH = Path(__file__).resolve().parent.parent          # orchestration/
+RUNS = ORCH / "runs"
+SUCCESS = {"PASS", "READY_FOR_HUMAN_REVIEW", "ROOT_CAUSE_ESTABLISHED", "NO_DEFECT_FOUND",
+           "REVIEW_COMPLETE", "IMPLREVIEW_COMPLETE"}
+# fixtures dirs use full workflow names; the CLI subcommand is the short form.
+CMD = {"architecture": "arch", "development": "dev", "investigation": "inv", "review": "review",
+       "implreview": "implreview"}
+
+
+def _run(workflow, scenario, extra=None):
+    """Run one mock workflow; return (returncode, final_status, output). The run's
+    STATUS file (status + reason) is appended to `output` before the run dir is
+    removed, so tests can assert on the reason (e.g. which iteration converged)."""
+    cmd = [sys.executable, "orchestrate.py", CMD[workflow], "--mock",
+           "--scenario", scenario, "--task", "unit-test"]
+    if extra:
+        cmd += extra
+    p = subprocess.run(cmd, cwd=str(ORCH), capture_output=True, text=True, timeout=180)
+    out = p.stdout + p.stderr
+    m = re.search(r"run (\S+) \(mock=True", out)
+    if m:
+        sf = RUNS / m.group(1) / "STATUS"
+        if sf.exists():
+            out += "\n[STATUS FILE]\n" + sf.read_text(encoding="utf-8")
+        shutil.rmtree(RUNS / m.group(1), ignore_errors=True)
+    ms = re.search(r"FINAL STATUS: (\S+)", out)
+    return p.returncode, (ms.group(1) if ms else None), out
+
+
+def _scenarios(workflow):
+    return sorted(p.stem for p in (ORCH / "fixtures" / workflow).glob("*.json"))
+
+
+class TestWorkflowsMock(unittest.TestCase):
+    def test_arch_pass(self):
+        rc, status, out = _run("architecture", "pass")
+        self.assertEqual(status, "PASS", out[-600:])
+        self.assertEqual(rc, 0)
+
+    def test_arch_escalate_pauses_for_human(self):
+        # Developer NEEDS_REVISION 5x -> Arbiter -> NEEDS_HUMAN_DECISION -> run PAUSES
+        # (AWAITING_HUMAN) for a resumable human decision.
+        rc, status, out = _run("architecture", "escalate")
+        self.assertEqual(status, "AWAITING_HUMAN", out[-600:])
+        self.assertEqual(rc, 2)
+        self.assertIn("Arbiter", out, out[-600:])
+
+    def test_arch_human_decide_pauses_without_answer(self):
+        # No --human-answer: the arbiter's NEEDS_HUMAN_DECISION pauses the run.
+        rc, status, out = _run("architecture", "human_decide")
+        self.assertEqual(status, "AWAITING_HUMAN", out[-600:])
+        self.assertEqual(rc, 2)
+
+    def test_arch_human_answer_resumes_to_pass(self):
+        # With --human-answer the arbiter's deferral is filled by the human ruling, the
+        # Developer then reaches FEASIBLE and the Tech Lead approves -> PASS.
+        rc, status, out = _run("architecture", "human_decide",
+                               extra=["--human-answer", "Bound the buffer to a fixed 4-entry budget."])
+        self.assertEqual(status, "PASS", out[-600:])
+        self.assertEqual(rc, 0)
+
+    def test_arch_techlead_reject_loops_then_passes(self):
+        # Developer FEASIBLE but Tech-Lead rejects once -> back to Architect<->Developer
+        # (not straight to the arbiter) -> FEASIBLE again -> Tech-Lead READY -> PASS at iter 2.
+        rc, status, out = _run("architecture", "techlead_rework")
+        self.assertEqual(status, "PASS", out[-600:])
+        self.assertEqual(rc, 0)
+        self.assertIn("iteration 2", out, out[-600:])
+
+    def test_dev_pass(self):
+        rc, status, out = _run("development", "pass")
+        self.assertEqual(status, "READY_FOR_HUMAN_REVIEW", out[-600:])
+        self.assertEqual(rc, 0)
+
+    def test_review_pass(self):
+        # Panel (3 lenses) + Review Arbiter NEEDS_REVISION -> REVIEW_COMPLETE (success).
+        rc, status, out = _run("review", "pass")
+        self.assertEqual(status, "REVIEW_COMPLETE", out[-600:])
+        self.assertEqual(rc, 0)
+
+    def test_review_insufficient_reaches_human_required(self):
+        # Arbiter INSUFFICIENT_INPUT -> HUMAN_REQUIRED (a review fails only on infra/no-input).
+        rc, status, out = _run("review", "insufficient")
+        self.assertEqual(status, "HUMAN_REQUIRED", out[-600:])
+        self.assertEqual(rc, 2)
+
+    def test_review_iterate_converges(self):
+        # Refine loop: round 1 NEEDS_REVISION -> reviser -> round 2 STRONG -> REVIEW_COMPLETE.
+        rc, status, out = _run("review", "converge", extra=["--iterate"])
+        self.assertEqual(status, "REVIEW_COMPLETE", out[-600:])
+        self.assertEqual(rc, 0)
+        # Proves it actually LOOPED (converged on round 2), not one-shot: reason names iteration 2.
+        self.assertIn("iteration 2", out, out[-600:])
+
+    def test_review_iterate_stuck_reaches_human_required(self):
+        # Never reaches STRONG within the budget -> HUMAN_REQUIRED (like arch not reaching FEASIBLE).
+        rc, status, out = _run("review", "stuck", extra=["--iterate", "--max-iterations", "2"])
+        self.assertEqual(status, "HUMAN_REQUIRED", out[-600:])
+        self.assertEqual(rc, 2)
+
+    def test_implreview_pass(self):
+        # Round 1: both peers FEASIBLE -> Tech Lead READY -> PM APPROVED -> IMPLREVIEW_COMPLETE.
+        rc, status, out = _run("implreview", "pass")
+        self.assertEqual(status, "IMPLREVIEW_COMPLETE", out[-600:])
+        self.assertEqual(rc, 0)
+
+    def test_implreview_rework_converges_on_round_two(self):
+        # Round 1 developer NEEDS_REVISION -> back to the author; round 2 both FEASIBLE ->
+        # Tech Lead READY -> PM APPROVED. Proves the back-edge (converged at iteration 2).
+        rc, status, out = _run("implreview", "rework")
+        self.assertEqual(status, "IMPLREVIEW_COMPLETE", out[-600:])
+        self.assertEqual(rc, 0)
+        self.assertIn("iteration 2", out, out[-600:])
+
+    def test_implreview_stuck_reaches_human_required(self):
+        # Developer repeats the SAME block; after trigger_after_cycles it routes to the
+        # Arbiter, which returns NEEDS_HUMAN_DECISION -> HUMAN_REQUIRED.
+        rc, status, out = _run("implreview", "stuck")
+        self.assertEqual(status, "HUMAN_REQUIRED", out[-600:])
+        self.assertEqual(rc, 2)
+        self.assertIn("Arbiter", out, out[-600:])
+
+    def test_every_shipped_scenario_terminates_cleanly(self):
+        # Regression net: every fixture in every workflow must reach a terminal status
+        # with a clean exit code (0 success / 2 human-required) — never hang or crash.
+        ran = 0
+        for wf in ("architecture", "development", "investigation", "review", "implreview"):
+            for sc in _scenarios(wf):
+                rc, status, out = _run(wf, sc)
+                self.assertIsNotNone(status, f"{wf}/{sc}: no FINAL STATUS\n{out[-600:]}")
+                self.assertIn(rc, (0, 2), f"{wf}/{sc}: unexpected exit {rc}\n{out[-600:]}")
+                # exit code must agree with the terminal vocabulary
+                self.assertEqual(rc == 0, status in SUCCESS, f"{wf}/{sc}: rc/status mismatch ({rc},{status})")
+                ran += 1
+        self.assertGreaterEqual(ran, 6, "expected several shipped scenarios")
+
+
+if __name__ == "__main__":
+    unittest.main()

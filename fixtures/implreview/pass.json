@@ -1,0 +1,12 @@
+{
+  "name": "pass",
+  "_comment": "Converge on the first round: author drafts; both peers FEASIBLE; Tech Lead READY; PM APPROVED -> IMPLREVIEW_COMPLETE at iteration 1.",
+  "responses": {
+    "impl.author": ["# Revised artifact (round 1)\nThe plan, hardened for implementation."],
+    "impl.dev_review": ["## Implementation Feasibility Verdict\nFEASIBLE\n\nBuildable within scope; interfaces and tests are clear."],
+    "impl.devops_review": ["## Operational Feasibility Verdict\nFEASIBLE\n\nInfra, rollout, and observability are budgeted and named."],
+    "impl.verifier": ["## Implementation Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\nSound, complete, consistent, proportionate."],
+    "impl.gating": ["## Delivery Gate Verdict\nAPPROVED\n\nScope, timeline, dependencies, and risks are clear and defensible."]
+  },
+  "default": {}
+}

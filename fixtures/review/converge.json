@@ -1,0 +1,26 @@
+{
+  "name": "converge",
+  "_comment": "Refine-loop happy path (`review --iterate`): round 1 arbiter=NEEDS_REVISION → reviser revises → round 2 arbiter=STRONG → REVIEW_COMPLETE (converged at iteration 2). Reviewer/arbiter lists are indexed per call, so entry [0]=round1, [1]=round2. Run WITHOUT --iterate this ends REVIEW_COMPLETE after round 1 (one-shot critique).",
+  "responses": {
+    "review.reviewer_correctness": [
+      "## Review Verdict\nMAJOR_CONCERNS\n\n### Findings\n- (mock r1) claim X unsupported.\n",
+      "## Review Verdict\nSOLID\n\n### Findings\n- (mock r2) resolved.\n"
+    ],
+    "review.reviewer_completeness": [
+      "## Review Verdict\nMAJOR_CONCERNS\n\n### Findings\n- (mock r1) empty-result case missing.\n",
+      "## Review Verdict\nSOLID\n\n### Findings\n- (mock r2) resolved.\n"
+    ],
+    "review.reviewer_risk": [
+      "## Review Verdict\nMINOR_CONCERNS\n\n### Findings\n- (mock r1) cache TTL unbounded.\n",
+      "## Review Verdict\nSOLID\n\n### Findings\n- (mock r2) resolved.\n"
+    ],
+    "review.arbiter": [
+      "## Review Arbiter Verdict\nNEEDS_REVISION\n\n### Must-Fix\n1. (mock) support claim X.\n2. (mock) add empty-result path.\n",
+      "## Review Arbiter Verdict\nSTRONG\n\nAll must-fix addressed; artifact is defensible.\n"
+    ],
+    "review.reviser": [
+      "# (mock) Revised artifact\nclaim X now supported; empty-result path added; cache TTL bounded.\n"
+    ]
+  },
+  "default": {}
+}
