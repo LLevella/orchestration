@@ -1,4 +1,4 @@
-"""Local AI orchestration for the SpaceBridge dataplane workspace.
+"""Local AI orchestration for a multi-repo workspace.
 
 Deterministic control flow drives role-bound AI agents (Claude, Codex, Gemini,
 DeepSeek) through architecture, development, investigation and review loops. The

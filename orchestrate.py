@@ -28,12 +28,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orchestrator.adapters import build_adapters  # noqa: E402
 from orchestrator import mr as mrlib  # noqa: E402
 from orchestrator.config import (BASE, WORKFLOWS, ConfigError, RunContext,  # noqa: E402
-                                 load_config, resolve_repos)
+                                 load_config, project_base, resolve_repos)
 from orchestrator.engine import HUMAN_REQUIRED, SUCCESS_STATUSES, Engine  # noqa: E402
 from orchestrator.guard import GitGuard  # noqa: E402
 from orchestrator.transcript import Transcript  # noqa: E402
 
+# Run history defaults to the tool's own runs/ (gitignored). A project that would
+# rather keep its history with the project - the tool is shared, the runs are not -
+# sets paths.runs_dir in its project layer.
 RUNS_DIR = BASE / "runs"
+
+
+def _runs_dir(workflows_cfg):
+    rel = workflows_cfg["paths"].get("runs_dir")
+    return (project_base(workflows_cfg) / rel).resolve() if rel else RUNS_DIR
 
 
 def _install_interrupt_handler(tx):
@@ -66,7 +74,7 @@ def _build_guard(workflows_cfg, extra_repos=()):
     guard = GitGuard([(label, path) for label, path, _ in repos] + list(extra_repos),
                      guard_cfg.get("exclude_prefix", "orchestration"),
                      guard_cfg.get("enabled", True))
-    repo_root = str((BASE / workflows_cfg["paths"]["repo_root"]).resolve())
+    repo_root = str((project_base(workflows_cfg) / workflows_cfg["paths"]["repo_root"]).resolve())
     return guard, repos, repo_root
 
 
@@ -222,7 +230,7 @@ def cmd_chains(args):
     'substitution' points (which family fills the arbiter seat + any active override)."""
     agents_cfg, workflows_cfg = load_config()
     agents = agents_cfg["agents"]
-    repo_root = str((BASE / workflows_cfg["paths"]["repo_root"]).resolve())
+    repo_root = str((project_base(workflows_cfg) / workflows_cfg["paths"]["repo_root"]).resolve())
     arbiter_agent = workflows_cfg.get("architecture", {}).get("arbiter", {}).get("agent", "?")
     arb_cfg = agents.get(arbiter_agent, {})
 
@@ -244,7 +252,17 @@ def cmd_doctor(args):
     guard, repos, repo_root = _build_guard(workflows_cfg)
     adapters = build_adapters(agents_cfg, mock=False, scenario=None, cwd=repo_root)
 
+    proj = workflows_cfg.get("_project") or {}
     print("== Orchestration doctor ==\n")
+    print(f"project layer  : {proj.get('_source', '(none)')}")
+    if "TEMPLATE" in proj.get("_source", ""):
+        print("  ^ the shipped template, NOT a real project: enough for --mock and the tests,")
+        print("    not for a real run. Copy config/project.example.json out of the repo, fill it")
+        print("    in, and symlink it to config/project.json (or set $ORCH_PROJECT).")
+    ctx_bits = [b for b in ("context_file" if proj.get("context_file") else "",
+                            f"role_context x{len(proj.get('role_context') or {})}"
+                            if proj.get("role_context") else "") if b]
+    print(f"project context: {', '.join(ctx_bits) if ctx_bits else '(none — base roles only)'}")
     print(f"workspace root : {repo_root}  (agent cwd; not itself a git repo)")
     print(f"git guard      : {'active' if guard.active else 'INACTIVE'}"
           f"  enabled={guard.enabled}  available={guard.available}")
@@ -343,7 +361,7 @@ def _run(workflow, args):
         )
     adapters = build_adapters(agents_cfg, mock=args.mock, scenario=scenario, cwd=repo_root)
     run_id = _make_run_id(workflow)
-    tx = Transcript(RUNS_DIR, run_id, workflow, task, args.mock, scenario_name,
+    tx = Transcript(_runs_dir(workflows_cfg), run_id, workflow, task, args.mock, scenario_name,
                     config_snapshot=workflows_cfg[workflow])
     _install_interrupt_handler(tx)
     ctx = RunContext(agents_cfg, workflows_cfg, adapters, guard, tx,
@@ -410,9 +428,11 @@ def _print_usage(run_dir):
 
 
 def cmd_show(args):
-    d = RUNS_DIR / args.run_id
+    _agents, workflows_cfg = load_config()
+    runs = _runs_dir(workflows_cfg)
+    d = runs / args.run_id
     if not d.exists():
-        runs = sorted(p.name for p in RUNS_DIR.glob("*")) if RUNS_DIR.exists() else []
+        runs = sorted(p.name for p in runs.glob("*")) if runs.exists() else []
         sys.exit(f"error: run '{args.run_id}' not found. Available: {runs}")
     status = (d / "STATUS").read_text(encoding="utf-8") if (d / "STATUS").exists() else "(no STATUS yet)"
     print(f"== {args.run_id} ==\n{status}")
@@ -460,16 +480,17 @@ def cmd_resume(args):
     """Resume an interrupted real run: replay its journaled steps instantly, then
     run the first un-journaled step and everything after it live. The working tree
     (including the developer's persisted edits) is reused as-is."""
-    src = RUNS_DIR / args.run_id
+    agents_cfg, workflows_cfg = load_config()
+    runs_dir = _runs_dir(workflows_cfg)
+    src = runs_dir / args.run_id
     if not src.exists() or not (src / "run.json").exists():
-        runs = sorted(p.name for p in RUNS_DIR.glob("*")) if RUNS_DIR.exists() else []
-        sys.exit(f"error: run '{args.run_id}' not found. Available: {runs}")
+        avail = sorted(p.name for p in runs_dir.glob("*")) if runs_dir.exists() else []
+        sys.exit(f"error: run '{args.run_id}' not found. Available: {avail}")
     meta = json.loads((src / "run.json").read_text(encoding="utf-8"))
     if meta.get("mock"):
         sys.exit("error: refusing to resume a mock run (re-run it with --mock instead).")
     workflow, task = meta["workflow"], meta["task"]
 
-    agents_cfg, workflows_cfg = load_config()
     guard, _repos, repo_root = _build_guard(workflows_cfg)
     if not guard.active and not args.allow_unguarded:
         sys.exit("refusing to resume: the git guard is inactive "
@@ -478,7 +499,7 @@ def cmd_resume(args):
     cache = _load_resume_cache(src)
     adapters = build_adapters(agents_cfg, mock=False, scenario=None, cwd=repo_root)
     run_id = _make_run_id(workflow)
-    tx = Transcript(RUNS_DIR, run_id, workflow, task, False, f"(resume of {args.run_id})",
+    tx = Transcript(runs_dir, run_id, workflow, task, False, f"(resume of {args.run_id})",
                     config_snapshot=workflows_cfg[workflow])
     tx.update_meta(resumed_from=args.run_id, resumed_steps=len(cache))
     _install_interrupt_handler(tx)

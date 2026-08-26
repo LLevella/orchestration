@@ -14,8 +14,14 @@ import sys
 import unittest
 from pathlib import Path
 
-ORCH = Path(__file__).resolve().parent.parent          # orchestration/
-RUNS = ORCH / "runs"
+from orchestrator.config import load_config, project_base
+
+ORCH = Path(__file__).resolve().parent.parent          # the tool directory
+# Run history is not necessarily inside the tool: a project layer can point runs_dir
+# somewhere else, and then that is where these runs must be found and cleaned up.
+_AGENTS, _WF = load_config()
+RUNS = ((project_base(_WF) / _WF["paths"]["runs_dir"]).resolve()
+        if _WF["paths"].get("runs_dir") else ORCH / "runs")
 SUCCESS = {"PASS", "READY_FOR_HUMAN_REVIEW", "ROOT_CAUSE_ESTABLISHED", "NO_DEFECT_FOUND",
            "REVIEW_COMPLETE", "IMPLREVIEW_COMPLETE"}
 # fixtures dirs use full workflow names; the CLI subcommand is the short form.

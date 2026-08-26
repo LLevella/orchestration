@@ -1,9 +1,10 @@
 """Unit tests for config loading + cross-config consistency.
 
-Copy-agnostic: works for BOTH orchestrator copies (dataplane arbiter=DeepSeek,
-phs-rs arbiter=Mistral) — it asserts CHAIN STRUCTURE and INTERNAL CONSISTENCY, never
-a specific arbiter model. The consistency test is the guard that would have caught the
-agents.json roles-allowlist miss (a role used in a workflow but not allowed for its agent).
+Project-agnostic: it asserts CHAIN STRUCTURE and INTERNAL CONSISTENCY of the shipped
+(reusable) config, never a specific project, repository, or arbiter model - which repos
+exist and where lives in the per-project layer and is none of this file's business. The
+consistency test is the guard that would have caught the agents.json roles-allowlist miss
+(a role used in a workflow but not allowed for its agent).
 """
 import unittest
 
@@ -86,7 +87,7 @@ class TestConfig(unittest.TestCase):
         """implreview's intended shape (Irina 2026-07-14): author + two peer reviewers are
         DISTINCT Claude-family read-only agents; the Tech-Lead verifier and the arbiter are
         read-only; the Project-Manager gating cell is the independent 4th family (not
-        claude/codex/gemini). Copy-agnostic: gating is deepseek (dataplane) or mistral (phs-rs)."""
+        claude/codex/gemini). The gating agent is whichever independent 4th family is configured."""
         im = self.wf["implreview"]
         claude_cells = [im["author"]["agent"], im["dev_reviewer"]["agent"], im["devops_reviewer"]["agent"]]
         for a in claude_cells:

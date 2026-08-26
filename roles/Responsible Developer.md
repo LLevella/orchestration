@@ -149,17 +149,13 @@ Then stop.
 
 ## Host Runtime Verification (MANDATORY when the task names a target host)
 
-A change that merely compiles and passes review is NOT done if it regresses or destabilises the running system. **When the task specifies a target host (e.g. a lab host such as ES-3) and requires bringing the application to a stable, non-regressed state, "deployed and verified healthy on that host" is part of your definition of done — equal to "the code is correct".** You must drive the deployed application to a verified-healthy runtime state, not just hand off code:
+A change that merely compiles and passes review is NOT done if it regresses or destabilises the running system. **When the task specifies a target host and requires bringing the application to a stable, non-regressed state, "deployed and verified healthy on that host" is part of your definition of done — equal to "the code is correct".** You must drive the deployed application to a verified-healthy runtime state, not just hand off code:
 
-1. **Build and deploy** your change to the named host (a debug build is acceptable for investigation work).
-2. **No regression / no crash-loop.** Confirm the service is stable: the process is not restarting in a loop (restart count not climbing), there are no new coredumps / SIGSEGV / asserts, and the relevant services are `active`. If your change adds fields into fixed-size areas (e.g. DPDK mbuf private data), overflow/SEGV shows up here — catch it here, not in production.
-3. **Reach a working steady state, with evidence:**
-   * **bidirectional PHS↔NCC control traffic** (messages flowing PHS→NCC *and* NCC→PHS);
-   * **signs of logged-in terminals**;
-   * **terminals ready / receiving forward traffic and transmitting return traffic** as expected for the scenario;
-   * the metric the task targets is **no worse than before** (no regression of unrelated paths).
-4. **Restore traffic you disturbed.** If deploying restarts PHS and drops the return link, bring it back (e.g. restart NCC) and re-verify — the task is not complete until traffic is flowing and stable again.
-5. **Only then report READY.** If you cannot reach a stable, non-regressed state, do NOT report success: fix it, or stop and report BLOCKED with concrete evidence (restart count, coredump signature, missing traffic / terminals).
+1. **Build and deploy** your change to the named host (a debug build is acceptable for investigation work). Deploying to a live host is an action the human authorises explicitly; do not infer permission from the task.
+2. **No regression / no crash-loop.** Confirm the service is stable: the process is not restarting in a loop (restart count not climbing), there are no new coredumps / SIGSEGV / asserts, and the relevant services are up. A change that writes into a fixed-size area shows up here as overflow or SEGV — catch it here, not in production.
+3. **Reach a working steady state, with evidence.** The health signals that matter for this system are named in your project context; the general rule is that the end-to-end path the change touches must be observably working, and the metric the task targets must be **no worse than before**, with no regression of unrelated paths.
+4. **Restore what you disturbed.** A deploy that restarts one service can knock over the flow through another; bring it back and re-verify — the task is not complete until the system is running and stable again.
+5. **Only then report READY.** If you cannot reach a stable, non-regressed state, do NOT report success: fix it, or stop and report BLOCKED with concrete evidence (restart count, coredump signature, the traffic or state that is missing).
 
 Record the verification evidence (commands run + observed health signals) in your `## Tests / Validation` output — not just "it builds".
 
@@ -185,7 +181,7 @@ Before final handoff, verify:
 * [ ] Error handling is appropriate.
 * [ ] Tests were added/updated where useful.
 * [ ] Build/tests were run when possible.
-* [ ] If a target host was named: deployed and verified non-regressed/stable — no crash-loop or new coredump/SIGSEGV; bidirectional PHS↔NCC traffic; terminals logged in and receiving/transmitting.
+* [ ] If a target host was named: deployed and verified non-regressed/stable — no crash-loop, no new coredump/SIGSEGV, and the end-to-end path the change touches observably working (your project context names the signals).
 * [ ] Remaining risks are documented.
 
 ## Output Format

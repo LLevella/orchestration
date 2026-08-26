@@ -1,0 +1,18 @@
+{
+  "_comment": "TEMPLATE for the per-project layer. Copy it out of this repository (it is the ONE file the tool reads that is not reusable), fill it in for your project, and point the tool at it: either $ORCH_PROJECT=/path/to/project.json, or symlink it to config/project.json (gitignored). With neither, the tool falls back to THIS template, which is enough for `--mock` runs and the test suite and not enough for a real run.",
+  "_paths_comment": "Every path here is relative to THIS FILE's directory, so a project layer kept beside the workspace it describes stays valid no matter where the tool is checked out. repo_root is the multi-repo workspace root and the cwd every agent CLI is launched in. dev_repos = repos the Developer MAY edit; analysis_repos = read-only context, never modified; the git guard watches both and capture_diff aggregates their diffs. roles_dir and runs_dir are optional: roles_dir replaces the tool's base role set entirely (prefer context_file/role_context instead), runs_dir moves run history out of the tool directory.",
+  "paths": {
+    "repo_root": ".",
+    "dev_repos": [],
+    "analysis_repos": [],
+    "docs_architecture": "docs/architecture"
+  },
+  "_guard_comment": "exclude_prefix is applied within each watched repo, so the tool's own output never shows up as a change if the tool happens to live inside one. Defaults to the tool directory's name.",
+  "guard": {
+    "enabled": true,
+    "exclude_prefix": "tools/orchestration"
+  },
+  "_context_comment": "The project's domain knowledge. context_file is appended to EVERY role's prompt; role_context adds a block only that role sees (the investigator's log-collection recipe is of no use to the PM gate, and every extra paragraph costs attention). Base roles stay identical across projects precisely because this is where the domain goes.",
+  "context_file": null,
+  "role_context": {}
+}

@@ -1,25 +1,5 @@
 {
-  "_comment": "Workflow control parameters. Config is authoritative for agent<->role binding and limits; the engine owns control flow. Paths are resolved relative to the orchestration/ directory.",
-  "paths": {
-    "_comment": "Paths are resolved relative to the tool directory (tools/orchestration/), so repo_root '../..' is the multi-repo workspace root. repo_root is also the cwd every agent CLI is launched in (so they can read all repos, roles, and docs). It is NOT itself a git repo. dev_repos = repos the Developer (Claude) MAY edit; analysis_repos = read-only context, never modified. Both lists are resolved relative to repo_root; the git guard watches ALL of them and capture_diff aggregates their diffs (each repo labelled writable/read-only).",
-    "repo_root": "../..",
-    "roles_dir": "roles",
-    "docs_architecture": "../../docs/architecture",
-    "dev_repos": [
-      "dataplane-phs-ng",
-      "dataplane-sdk"
-    ],
-    "analysis_repos": [
-      "MCD4_Lite",
-      "ncc-core",
-      "idu/sdk-s8000"
-    ]
-  },
-  "guard": {
-    "_comment": "exclude_prefix is applied within each watched repo; the tool dir lives at the workspace root under tools/, outside every watched repo, so its run output never appears in any repo's status. The prefix still matters if a watched repo ever grows a path of the same name.",
-    "enabled": true,
-    "exclude_prefix": "tools/orchestration"
-  },
+  "_comment": "Workflow control parameters - the reusable half of the configuration: what each workflow's chain is, which role each step binds, the loop limits and the roster. Everything that is NOT reusable across projects - which repositories exist and where, the guard's exclude prefix, and the project's domain context - lives in the per-project layer (config/project.example.json documents it) and is merged over this file at load time. Config is authoritative for agent<->role binding; the engine owns control flow.",
   "validation": {
     "_comment": "RESERVED / NOT YET ENFORCED. The orchestrator itself never executes build/test commands; the Developer (Claude) agent runs them inside its own sandbox during its step. These fields document intended policy and are read by no code today: reviewers stay pure-analysis. Wiring orchestrator-side command execution is deliberately out of scope for the conservative first cut.",
     "developer_commands": [
@@ -40,7 +20,7 @@
     },
     "roster": {
       "_comment": "Approved chain (Irina 2026-06-15): codex · opus(pinned dev, max-effort) · gemini · deepseek · sonnet · haiku. developer_verifier is PINNED to claude_reviewer — the shift-left jumps OVER it so the developer review is ALWAYS a real Claude developer, never displaced to another vendor (if opus itself exhausts the pin falls back to claude_sonnet→claude_haiku, still Claude). Non-pinned cells (author, tech_lead, arbiter) fill positionally from the live chain. With codex disabled: author=gemini, dev_verifier=claude_reviewer, tech_lead=deepseek, arbiter=claude_sonnet.",
-      "_author_swap_2026_07_10": "REVERTED 2026-07-10 (Irina: 'codex ожил, можно использовать') — codex back at arch-chain head (cross-vendor author restored). The temporary codex->claude swap covered the window when codex was quota-dying mid-arch (run 20260709T173818Z-architecture-5bdc died iter6). The claude-author finalization run 20260710T081637Z-architecture-6fb6 launched during the swap keeps its snapshotted roster (author=claude) and finishes on Opus; this revert affects only subsequent arch runs. Operational toggle, NOT synced to phs-rs.",
+      "_author_swap_2026_07_10": "REVERTED 2026-07-10 (Irina: 'codex ожил, можно использовать') — codex back at arch-chain head (cross-vendor author restored). The temporary codex->claude swap covered the window when codex was quota-dying mid-arch (run 20260709T173818Z-architecture-5bdc died iter6). The claude-author finalization run 20260710T081637Z-architecture-6fb6 launched during the swap keeps its snapshotted roster (author=claude) and finishes on Opus; this revert affects only subsequent arch runs. Operational toggle (environment state, not project configuration).",
       "chain": [
         "codex",
         "claude_reviewer",
@@ -227,7 +207,7 @@
       "trigger_after_cycles": 2
     },
     "roster": {
-      "_comment": "Explicit per-role assignment (Irina 2026-07-14): author + both peer reviewers are Claude Opus at MAX reasoning effort (claude_author / claude_reviewer / claude_devops, all MAX_THINKING_TOKENS=31999) — three DISTINCT opus agents because one agent cannot fill two roster cells. verifier PINNED to codex (Tech Lead), gating PINNED to deepseek (Project Manager), arbiter PINNED to gemini. Each pin falls back to the next live same-family Claude on exhaustion (shift-left). DIVERGENCE: the dataplane copy pins gating=deepseek; the phs-rs copy pins gating=mistral (independent 4th family).",
+      "_comment": "Explicit per-role assignment (Irina 2026-07-14): author + both peer reviewers are Claude Opus at MAX reasoning effort (claude_author / claude_reviewer / claude_devops, all MAX_THINKING_TOKENS=31999) — three DISTINCT opus agents because one agent cannot fill two roster cells. verifier PINNED to codex (Tech Lead), gating PINNED to deepseek (Project Manager), arbiter PINNED to gemini. Each pin falls back to the next live same-family Claude on exhaustion (shift-left). The gating cell is pinned to whichever independent 4th family is configured (here deepseek).",
       "chain": [
         "claude_author",
         "claude_reviewer",
@@ -282,7 +262,7 @@
     "default_mock_scenario": "pass"
   },
   "mrreview": {
-    "_comment": "MR REVIEW PANEL (added 2026-08-21, Irina; merged into this copy 2026-08-26 as `mrreview` so it does not collide with `review`, which reviews an ARTIFACT with three adversarial lenses and an arbiter). Four experts review the SAME merge request INDEPENDENTLY - no cross-talk, no iteration, no gate: the deliverable is a LIST OF CODE REMARKS for the author, not a PASS/FAIL verdict, so nothing here blocks or re-runs anybody. Each expert carries one `lens` as EMPHASIS (it still reviews the whole diff) so four opinions cover more ground than four generalists would. A fifth step (Review Moderator) merges the four opinions into one deduplicated, severity-ranked list and the orchestrator writes it to runs/<id>/artifacts/mr-review.md; the moderator may never invent a finding the panel did not make. Experts appear in the document as Reviewer 1..4 - who was who stays in the run dir, not in the deliverable. Agents are resolved by `roster` at run start; an expert cell whose agent is dead shifts left, so a dead vendor costs one opinion at worst, never the run (>=2 opinions still produce the document).",
+    "_comment": "MR REVIEW PANEL (added 2026-08-21, Irina; merged in 2026-08-26 as `mrreview` so it does not collide with `review`, which reviews an ARTIFACT with three adversarial lenses and an arbiter). Four experts review the SAME merge request INDEPENDENTLY - no cross-talk, no iteration, no gate: the deliverable is a LIST OF CODE REMARKS for the author, not a PASS/FAIL verdict, so nothing here blocks or re-runs anybody. Each expert carries one `lens` as EMPHASIS (it still reviews the whole diff) so four opinions cover more ground than four generalists would. A fifth step (Review Moderator) merges the four opinions into one deduplicated, severity-ranked list and the orchestrator writes it to runs/<id>/artifacts/mr-review.md; the moderator may never invent a finding the panel did not make. Experts appear in the document as Reviewer 1..4 - who was who stays in the run dir, not in the deliverable. Agents are resolved by `roster` at run start; an expert cell whose agent is dead shifts left, so a dead vendor costs one opinion at worst, never the run (>=2 opinions still produce the document).",
     "max_iterations": 1,
     "roster": {
       "_comment": "Four DIFFERENT model families sit on the panel by construction - the roster assigns each cell a distinct agent, so with everything live the panel is codex . claude_reviewer(opus, max-effort) . gemini . deepseek and claude_sonnet moderates. Nothing is pinned: the point of the panel is four independent heads, and which vendor supplies each of them does not change that. With codex disabled the chain shifts left (claude_reviewer, gemini, deepseek, claude_sonnet on the panel, claude moderating).",
@@ -311,7 +291,7 @@
     "expert_2": {
       "agent": "claude_reviewer",
       "role": "MR Review Expert",
-      "lens": "Contract and architecture conformance: the interface specification the change claims to implement (for hub-side work the NCC<->PHS control-plane spec and the ConfD/YANG models), the ADRs and the decisions-and-deviations log, and interfaces other components already depend on."
+      "lens": "Contract and architecture conformance: the interface specification the change claims to implement, the data models it must honour, the ADRs and the decisions-and-deviations log, and interfaces other components already depend on. Your project context names the ones that apply."
     },
     "expert_3": {
       "agent": "gemini",

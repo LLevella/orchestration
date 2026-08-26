@@ -110,9 +110,53 @@ def _load_json(path: Path):
         raise ConfigError(f"invalid JSON in {path}: line {e.lineno} col {e.colno}: {e.msg}") from e
 
 
+# The per-project layer. Everything in this repository is meant to be reusable by any
+# project; what is NOT reusable - which repositories exist, where they live, what the
+# domain is, which tooling and hosts the work happens on - lives in ONE file outside the
+# tool's tracked content and is merged in here at load time.
+#
+# Resolution order (first hit wins):
+#   1. $ORCH_PROJECT            - a project.json, or a directory holding one
+#   2. config/project.json      - gitignored; usually a symlink to the real project layer
+#   3. config/project.example.json - the shipped template, so a fresh clone still runs
+#                                    `--mock` and the test suite with no setup at all
+PROJECT_ENV = "ORCH_PROJECT"
+PROJECT_FILE = "project.json"
+PROJECT_EXAMPLE = "project.example.json"
+
+
+def project_config_path() -> tuple[Path, str]:
+    """Return (path, source) of the project layer to load. See PROJECT_ENV."""
+    env = os.environ.get(PROJECT_ENV)
+    if env:
+        cand = Path(env).expanduser()
+        if cand.is_dir():
+            cand = cand / PROJECT_FILE
+        if not cand.exists():
+            raise ConfigError(f"${PROJECT_ENV} points at {cand}, which does not exist")
+        return cand.resolve(), f"${PROJECT_ENV}"
+    local = BASE / "config" / PROJECT_FILE
+    # resolve(): config/project.json is normally a SYMLINK to a project layer kept beside
+    # the project, and that layer's paths are relative to where it really lives - resolving
+    # the link here is what makes "repo_root": ".." mean the project, not the tool's config/.
+    if local.exists():
+        return local.resolve(), f"config/{PROJECT_FILE} -> {local.resolve()}"
+    return (BASE / "config" / PROJECT_EXAMPLE).resolve(), f"config/{PROJECT_EXAMPLE} (TEMPLATE)"
+
+
 def load_config():
     agents = _load_json(BASE / "config" / "agents.json")
     workflows = _load_json(BASE / "config" / "workflows.json")
+    project_path, project_source = project_config_path()
+    project = _load_json(project_path)
+    # The project layer OWNS `paths` and `guard`; workflows.json owns the workflows
+    # themselves. Merging here means every consumer keeps reading workflows_cfg["paths"]
+    # exactly as before and nothing else has to know the split exists.
+    for key in ("paths", "guard"):
+        if key in project:
+            workflows[key] = {**workflows.get(key, {}), **project[key]}
+    workflows["_project"] = {**project, "_path": str(project_path), "_source": project_source,
+                             "_dir": str(project_path.parent)}
     _validate(agents, workflows)
     return agents, workflows
 
@@ -121,13 +165,13 @@ def resolve_repos(workflows_cfg):
     """Resolve the workspace repos to [(label, abspath, kind)].
 
     kind is 'dev' (writable by the Developer) or 'analysis' (read-only context).
-    label is the configured relative path (e.g. 'dataplane-phs-ng',
-    'idu/sdk-s8000'); abspath is resolved under paths.repo_root. Both the git
+    label is the configured relative path (e.g. 'service-a', 'vendor/sdk');
+    abspath is resolved under paths.repo_root. Both the git
     guard and capture_diff iterate this list, so a single source of truth keeps
     the protected set and the reviewer diff in sync.
     """
     paths = workflows_cfg["paths"]
-    root = (BASE / paths["repo_root"]).resolve()
+    root = (project_base(workflows_cfg) / paths["repo_root"]).resolve()
     out = []
     for rel in paths.get("dev_repos", []):
         out.append((rel, str((root / rel).resolve()), "dev"))
@@ -136,11 +180,38 @@ def resolve_repos(workflows_cfg):
     return out
 
 
+def project_base(workflows_cfg) -> Path:
+    """Directory that `paths` in the project layer are relative to.
+
+    The project layer lives outside this repository, so its paths are resolved against
+    ITS OWN directory - a project file kept beside the workspace it describes says
+    `"repo_root": "."`, and moving the tool never invalidates it.
+    """
+    d = (workflows_cfg.get("_project") or {}).get("_dir")
+    return Path(d) if d else BASE
+
+
+def _read_context(base: Path, ref):
+    """Read a project-context file named by the project layer, relative to it.
+
+    A missing file is a configuration error, not a silent no-op: a run whose agents
+    quietly lost the project's domain knowledge looks like a model that got worse.
+    """
+    if not ref:
+        return ""
+    f = (base / ref).expanduser()
+    if not f.exists():
+        raise ConfigError(f"project layer references a context file that does not exist: {f}")
+    return f.read_text(encoding="utf-8").strip()
+
+
 def _validate(agents, workflows):
     if "agents" not in agents:
         raise ConfigError("agents.json: missing top-level 'agents' object")
     if "paths" not in workflows:
-        raise ConfigError("workflows.json: missing 'paths' object")
+        src = (workflows.get("_project") or {}).get("_source", "the project layer")
+        raise ConfigError(f"no 'paths' object: {src} must provide one "
+                          "(see config/project.example.json)")
     known = {n for n in agents["agents"] if not n.startswith("_")}
     for wf in WORKFLOWS:
         if wf not in workflows:
@@ -171,11 +242,24 @@ class RunContext:
         # feeds it back as a binding ruling. None on a normal run.
         self.human_answer = human_answer
         paths = workflows_cfg["paths"]
-        self.repo_root = (BASE / paths["repo_root"]).resolve()
-        self.roles_dir = (BASE / paths["roles_dir"]).resolve()
-        self.docs_arch = (BASE / paths["docs_architecture"]).resolve()
-        self.exclude = workflows_cfg.get("guard", {}).get("exclude_prefix", "orchestration")
+        pbase = project_base(workflows_cfg)
+        self.repo_root = (pbase / paths["repo_root"]).resolve()
+        self.docs_arch = (pbase / paths.get("docs_architecture", "docs/architecture")).resolve()
+        # Base roles ship WITH the tool and are the same for every project. A project may
+        # point `roles_dir` at its own set, and then it owns them entirely - but the
+        # supported way to add project knowledge is `context_file` / `role_context` below,
+        # which leaves the base roles identical everywhere.
+        self.roles_dir = ((pbase / paths["roles_dir"]).resolve() if paths.get("roles_dir")
+                          else (BASE / "roles").resolve())
+        self.exclude = workflows_cfg.get("guard", {}).get("exclude_prefix", BASE.name)
         self._role_cache: dict[str, str] = {}
+        # Project knowledge injected into prompts: one block every role sees, plus
+        # optional per-role blocks (the investigator's lab-log recipe is of no use to the
+        # PM gate, and every extra paragraph costs attention).
+        proj = workflows_cfg.get("_project") or {}
+        self.project_context = _read_context(pbase, proj.get("context_file"))
+        self.role_context = {role: _read_context(pbase, ref)
+                             for role, ref in (proj.get("role_context") or {}).items()}
         # Per-repo baseline HEADs captured at run start; capture_diff compares
         # each repo's working tree against its own baseline.
         self.repos = resolve_repos(workflows_cfg)
@@ -201,7 +285,11 @@ class RunContext:
             wf = BASE / "prompts" / wrapper
             if wf.exists():
                 text = text + "\n\n---\n\n" + wf.read_text(encoding="utf-8")
-        # Last, so it wins over anything a role file or wrapper says.
+        for block, head in ((self.project_context, "Project context"),
+                            (self.role_context.get(role, ""), f"Project context for {role}")):
+            if block:
+                text += f"\n\n---\n\n## {head}\n\n{block}"
+        # Last, so it wins over anything a role file, wrapper, or project context says.
         return text + "\n" + GLOBAL_POLICY
 
     def roles_present(self):

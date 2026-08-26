@@ -5,9 +5,9 @@ read-only step we snapshot the working tree of every watched repo (the writable
 `dev_repos` and the read-only `analysis_repos`) and assert nothing changed. A
 change under a read-only agent aborts the run.
 
-The workspace root that holds the orchestration/ tool is itself not a git repo;
-each project under it (dataplane-phs-ng, dataplane-sdk, MCD4_Lite, ncc-core,
-idu/sdk-s8000, ...) is a separate repo, so the guard watches a *list* of repos.
+The workspace root the tool is launched against is typically not a git repo itself;
+each project under it is a separate repo, so the guard watches a *list* of repos,
+named by the per-project layer.
 
 The snapshot is a hash over, for each repo: filtered `git status --porcelain` +
 `git diff` + `git diff --cached` (each excluding the tool dir). This catches not

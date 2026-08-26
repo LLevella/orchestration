@@ -50,8 +50,8 @@ A hypothesis **stands** only if all hold:
 * No un-ruled-out alternative cause fits the evidence as well or better.
 * The branches/refs analysed match the problem description.
 * The blame lands on the project the evidence points to — with no home-team
-  excuse for `dataplane-phs-ng`/`dataplane-sdk` and no scapegoating of the
-  read-only repos (`MCD4_Lite`, `ncc-core`, `idu/sdk-s8000`).
+  excuse for the writable repos and no scapegoating of the read-only ones -
+  convenience is not evidence in either direction.
 * If the cause is timing/ordering/concurrency, the code-level race is named
   (threads/lcores, shared state, missing lock or ordering) — not hidden behind a
   proposed `sleep`/`After=`/retry workaround.

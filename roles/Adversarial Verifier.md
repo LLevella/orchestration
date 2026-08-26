@@ -46,9 +46,9 @@ If you simply re-run the Refuter's attacks, you add nothing. Find a new one.
 Re-test the blame assignment from scratch. The fact that the loop settled on a
 given repo is not evidence the repo is at fault — it may be where two people
 stopped looking. Verify the cited `repo/path:line` on the stated branch yourself,
-and confirm the contract between projects (NCC↔PHS, PHS↔SDK, MCD4↔PHS, IDU↔hub)
-actually breaks where claimed. Excusing phs-ng/sdk or scapegoating the read-only
-repos is as disqualifying for you as for everyone else.
+and confirm the contract between the components involved actually breaks where
+claimed. Excusing a writable repo or scapegoating a read-only one is as
+disqualifying for you as for everyone else.
 
 ## How to Attack Differently
 

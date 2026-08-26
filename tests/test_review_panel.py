@@ -34,8 +34,8 @@ ORCH = Path(__file__).resolve().parent.parent
 
 
 def _mr(diff="--- a/x.py\n+++ b/x.py\n@@\n-old\n+new\n"):
-    return mrlib.MRContext(subject="add retry to backend call", repo_label="dataplane-phs-ng",
-                           repo_path="/w/dataplane-phs-ng", base="origin/main", head="feat/x",
+    return mrlib.MRContext(subject="add retry to backend call", repo_label="example/service",
+                           repo_path="/w/example/service", base="origin/main", head="feat/x",
                            base_sha="a" * 40, head_sha="b" * 40, diff=diff,
                            stat=" x.py | 2 +-", commits="deadbee add retry")
 
@@ -44,7 +44,7 @@ def _engine():
     _, workflows = load_config()
     ctx = MagicMock()
     ctx.workflows = workflows
-    ctx.repo_scope_line.return_value = "Scope — WRITABLE: dataplane-phs-ng; READ-ONLY: (none)."
+    ctx.repo_scope_line.return_value = "Scope — WRITABLE: example/service; READ-ONLY: (none)."
     return Engine(ctx, "mrreview")
 
 
@@ -152,7 +152,7 @@ class TestReviewScope(unittest.TestCase):
         # A review targets one repository, which may be one the dev workflow never
         # touches; reusing the dev scope line would tell reviewers the wrong repo.
         line = _engine()._review_scope_line(_mr())
-        self.assertIn("dataplane-phs-ng", line)      # the MRContext under test
+        self.assertIn("example/service", line)      # the MRContext under test
         self.assertIn("READ-ONLY", line)
         self.assertIn("not read", line.lower())
 
@@ -172,13 +172,13 @@ class TestGuardScope(unittest.TestCase):
     def test_change_in_another_repo_is_tolerated(self):
         e = _engine()
         e._review_repo_label = "projects/monolith"
-        self.assertTrue(e._outside_review_scope(self._violation({"dataplane-phs-ng"})))
+        self.assertTrue(e._outside_review_scope(self._violation({"example/service"})))
 
     def test_change_in_the_reviewed_repo_still_aborts(self):
         e = _engine()
         e._review_repo_label = "projects/monolith"
         self.assertFalse(e._outside_review_scope(
-            self._violation({"projects/monolith", "dataplane-phs-ng"})))
+            self._violation({"projects/monolith", "example/service"})))
 
     def test_unattributable_change_still_aborts(self):
         # No labels = the guard could not say where it happened; stay conservative.
@@ -190,7 +190,7 @@ class TestGuardScope(unittest.TestCase):
         e = _engine()
         e.workflow = "development"
         e._review_repo_label = "projects/monolith"
-        self.assertFalse(e._outside_review_scope(self._violation({"dataplane-phs-ng"})))
+        self.assertFalse(e._outside_review_scope(self._violation({"example/service"})))
 
     def test_guard_attributes_a_content_change_to_its_repo(self):
         # A further edit to an ALREADY dirty file adds no porcelain line; without the

@@ -32,10 +32,10 @@ agreement means you actively tried to break the chain and could not.
 The Investigator may favour or distrust a repo. You do not inherit that.
 Re-examine the claim for both biases:
 
-* Did the Investigator excuse `dataplane-phs-ng` / `dataplane-sdk` because it is
+* Did the Investigator excuse a WRITABLE repo because it is
   "our code"? Re-check those paths yourself.
-* Did the Investigator pin the blame on `MCD4_Lite` / `ncc-core` /
-  `idu/sdk-s8000` because they are read-only and out of scope to fix? Demand that
+* Did the Investigator pin the blame on a READ-ONLY repo because it is out of
+  scope to fix, and therefore convenient? Demand that
   the evidence actually points there, not just that it is convenient.
 
 A hypothesis that blames the wrong project is refuted, even if *some* defect

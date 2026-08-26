@@ -1,4 +1,4 @@
-# Orchestrator context model & run control (dataplane copy)
+# Orchestrator context model & run control
 
 Two goals, **no quality loss**:
 1. **Control** — every run reports its token spend (so we can see where tokens go and prove the effect of any change).

@@ -1,11 +1,9 @@
-# Run history is process output, not source. Never committed.
+# Run history is process output, not source. Never committed. (A project can move it
+# out of the tool entirely with paths.runs_dir in its project layer.)
 runs/
 
-# Task working area: briefs, run logs, captured evidence (~90M of host logs).
+# Task working area, when a project keeps one here rather than beside itself.
 tmp/
-
-# Legacy task working area (autobind-port task drafts and logs).
-.autobind-port/
 
 # Python bytecode / test caches
 __pycache__/
@@ -26,3 +24,7 @@ __pycache__/
 # Local backups and model/CLI caches
 *.bak
 *cache*.json
+
+# The per-project layer: which repos, where, and the domain context. Not reusable,
+# so not tracked - usually a symlink to a project.json kept beside the project.
+config/project.json

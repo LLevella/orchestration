@@ -27,7 +27,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import BASE, git_clean_env, resolve_repos
+from .config import git_clean_env, project_base, resolve_repos
 
 # A diff larger than this is truncated before it reaches any prompt. Announced
 # in-band, never silently: a silently truncated diff reads to a reviewer as "that
@@ -43,7 +43,7 @@ class MRResolutionError(Exception):
 class MRContext:
     """Everything the panel is shown about the change under review."""
     subject: str                 # human title of the change
-    repo_label: str              # e.g. 'dataplane-phs-ng', or '(diff file)'
+    repo_label: str              # a watched repo's label, or '(diff file)'
     repo_path: str | None
     base: str | None
     head: str | None
@@ -102,7 +102,7 @@ def pick_repo(workflows_cfg, label: str | None):
     already covers it; an unwatched review target is added to the guard for the run.
     """
     repos = resolve_repos(workflows_cfg)
-    root = (BASE / workflows_cfg["paths"]["repo_root"]).resolve()
+    root = (project_base(workflows_cfg) / workflows_cfg["paths"]["repo_root"]).resolve()
     if label:
         for lbl, path, _kind in repos:
             if lbl == label or lbl.endswith("/" + label):

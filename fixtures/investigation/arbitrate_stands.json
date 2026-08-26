@@ -3,16 +3,16 @@
   "_comment": "Verifier-escalation path: Refuter cannot break the hypothesis (NOT_REFUTED), but the independent Verifier (Codex) and Refuter reach an honest impasse, so the Verifier returns NEEDS_ARBITRATION. The Investigation Arbiter (DeepSeek) rules HYPOTHESIS_STANDS -> ROOT_CAUSE_ESTABLISHED at the first arbitration iteration.",
   "responses": {
     "inv.investigator": [
-      "## Investigator Verdict\nHYPOTHESIS_READY_FOR_REFUTATION\n\n## Hypotheses (ranked)\n### H1 — contract mismatch between ncc-core and dataplane-phs-ng (Confidence: High)\n- Code: dataplane-phs-ng/mock.rs:100 reads a field ncc-core stopped sending on the named branch.\n- Mechanism: PHS classifier routes only port 10001; the LOGON on 10002 is dropped.\n- Falsifier: a 10002 LOGON appears classified in the PHS logs.\n"
+      "## Investigator Verdict\nHYPOTHESIS_READY_FOR_REFUTATION\n\n## Hypotheses (ranked)\n### H1 — contract mismatch between upstream-svc and service-a (Confidence: High)\n- Code: service-a/mock.rs:100 reads a field upstream-svc stopped sending on the named branch.\n- Mechanism: the classifier routes only port 10001; the request on 10002 is dropped.\n- Falsifier: a 10002 request appears classified in the service-a logs.\n"
     ],
     "inv.refuter": [
-      "## Refutation Verdict\nNOT_REFUTED\n\n## Attacks Attempted\n- Break-the-chain: the symptom->code->mechanism links hold on the stated branches.\n- Alternative cause: none that fits the dropped-10002 evidence better.\n\n## Bias Check\n- Neither phs-ng nor ncc-core wrongly excused; the contract genuinely breaks between them.\n"
+      "## Refutation Verdict\nNOT_REFUTED\n\n## Attacks Attempted\n- Break-the-chain: the symptom->code->mechanism links hold on the stated branches.\n- Alternative cause: none that fits the dropped-10002-port evidence better.\n\n## Bias Check\n- Neither service-a nor upstream-svc wrongly excused; the contract genuinely breaks between them.\n"
     ],
     "inv.verifier": [
-      "## Verification Verdict\nNEEDS_ARBITRATION\n\n## Independent Re-Derivation\n- Chain matches, but whether the alternative 'NCC config, not code' cause is ruled out is a judgement call.\n\n## If NEEDS_ARBITRATION\n- Disagreement: Refuter treats the config alternative as ruled out; I do not. Arbiter must decide whether it is ruled out enough.\n"
+      "## Verification Verdict\nNEEDS_ARBITRATION\n\n## Independent Re-Derivation\n- Chain matches, but whether the alternative 'configuration, not code' cause is ruled out is a judgement call.\n\n## If NEEDS_ARBITRATION\n- Disagreement: Refuter treats the config alternative as ruled out; I do not. Arbiter must decide whether it is ruled out enough.\n"
     ],
     "inv.arbiter": [
-      "## Arbitration Verdict\nHYPOTHESIS_STANDS\n\n## Evidence Ruling\n- Chain complete? Yes\n- Falsifier checked and held? Yes\n- Un-ruled-out alternative exists? No — the config alternative would also fire on healthy hosts; it does not.\n- Right project blamed (contract mismatch phs-ng<->ncc-core)? Yes\n\n## Decision\n- The Investigator's chain is the more complete, raw-evidence-backed one; the hypothesis stands.\n"
+      "## Arbitration Verdict\nHYPOTHESIS_STANDS\n\n## Evidence Ruling\n- Chain complete? Yes\n- Falsifier checked and held? Yes\n- Un-ruled-out alternative exists? No — the config alternative would also fire on healthy hosts; it does not.\n- Right project blamed (contract mismatch service-a<->upstream-svc)? Yes\n\n## Decision\n- The Investigator's chain is the more complete, raw-evidence-backed one; the hypothesis stands.\n"
     ]
   },
   "default": {}

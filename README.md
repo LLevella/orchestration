@@ -1,4 +1,4 @@
-# Local AI Orchestration (dataplane workspace)
+# Local AI Orchestration
 
 A safe, local, multi-agent orchestrator that drives six loops automatically —
 **architecture**, **development**, **investigation** (root-cause), **review** (of
@@ -8,9 +8,9 @@ iteration limits, and stops with a successful conclusion (**PASS** /
 **READY_FOR_HUMAN_REVIEW** / **ROOT_CAUSE_ESTABLISHED** / **NO_DEFECT_FOUND** /
 **REVIEW_COMPLETE** / **IMPLREVIEW_COMPLETE**) or **HUMAN_REQUIRED**.
 
-This copy is configured for the **multi-repo `dataplane/` workspace**: the
-Developer actively edits the `dev_repos`, while the `analysis_repos` are
-read-only context. See **[Workspace & repositories](#workspace--repositories)**.
+Everything in this repository is meant to be **reusable by any project**. What is
+not reusable — which repositories exist and where they live, and the domain the
+work is about — is one file outside it: the **[per-project layer](#the-per-project-layer)**.
 
 Control flow is deterministic Python (stdlib only). All reasoning lives in the
 agents and the role files under [`roles/`](roles). The orchestrator only
@@ -37,20 +37,49 @@ Where each is configured: **Claude** — `claude` CLI session model (Opus 4.8) +
 the model). Bindings in `agents.json` are authoritative; role-file `model:` frontmatter
 is ignored.
 
-## Workspace & repositories
+## The per-project layer
 
-The orchestration tool lives at the **workspace root** `dataplane/`, which is
-**not** itself a git repo — each project under it is a separate repo. Config
-(`config/workflows.json` → `paths`) declares two sets:
+The split is the point: **this repository holds only what any project can reuse**
+— the engine, the base roles, the workflows, the fixtures and the tests. One file,
+kept outside it, says what THIS project is:
 
-| Set | Repos | Developer (Claude) | Reviewers | Guard | capture_diff |
-|---|---|---|---|---|---|
-| `dev_repos` | `dataplane-phs-ng`, `dataplane-sdk` | **may edit** (active development) | read-only | watched | labelled **WRITABLE** |
-| `analysis_repos` | `MCD4_Lite`, `ncc-core`, `idu/sdk-s8000` | read-only context | read-only | watched | labelled **READ-ONLY** |
+```jsonc
+{
+  "paths": {
+    "repo_root": "..",                       // the multi-repo workspace root
+    "dev_repos":      ["service-a", "sdk"],  // the Developer MAY edit these
+    "analysis_repos": ["upstream-x"],        // read-only context, never modified
+    "docs_architecture": "../docs/architecture"
+  },
+  "guard":   { "enabled": true, "exclude_prefix": "tools/orchestration" },
+  "context_file": "context.md",              // appended to EVERY role's prompt
+  "role_context": {                          // ... and blocks only one role sees
+    "Root Cause Investigator": "roles-context/root-cause-investigator.md"
+  }
+}
+```
 
-- **`repo_root`** (`..` = `dataplane/`) is the **cwd every agent CLI is launched
-  in**, so Codex/Gemini/Claude can read all repos, `roles/`, and `docs/`
-  regardless of where you invoke `orchestrate.py` from.
+Paths in it are relative to **its own** directory, so it stays valid wherever the
+tool is checked out. The tool finds it, in order: `$ORCH_PROJECT` (a file or a
+directory), `config/project.json` (gitignored — normally a symlink to the real
+one), and failing both the shipped `config/project.example.json`, which is enough
+for `--mock` runs and the test suite and not enough for a real run. `doctor` prints
+which one is in force.
+
+**Base roles are identical for every project.** Domain knowledge — the components,
+the contracts, the tooling and hosts, the local ground rules — belongs in
+`context_file` / `role_context`, which are appended to the role prompt after the
+role text and before the global policy. A project *can* replace the whole set with
+`paths.roles_dir`, but then it owns them, and they drift.
+
+| Set | Developer (Claude) | Reviewers | Guard | capture_diff |
+|---|---|---|---|---|
+| `dev_repos` | **may edit** (active development) | read-only | watched | labelled **WRITABLE** |
+| `analysis_repos` | read-only context | read-only | watched | labelled **READ-ONLY** |
+
+- **`repo_root`** is the **cwd every agent CLI is launched in**, so Codex/Gemini/
+  Claude can read all repos, `roles/`, and `docs/` regardless of where you invoke
+  `orchestrate.py` from.
 - The **git guard** snapshots *all* watched repos (dev + analysis) around every
   read-only step; any change under a read-only agent aborts the run, with the
   delta labelled by repo. Because the root is not a git repo, the guard is
@@ -76,7 +105,7 @@ To retarget the workspace, edit `paths.dev_repos` / `paths.analysis_repos` in
 ## Quick start
 
 ```bash
-cd tools/orchestration   # under the dataplane/ workspace root
+cd tools/orchestration   # wherever the tool is checked out
 
 # 1) Check what's installed / configured (never installs anything)
 python3 orchestrate.py doctor
@@ -86,8 +115,8 @@ python3 orchestrate.py arch --mock --task "Add a health-check endpoint."
 python3 orchestrate.py arch --mock --scenario escalate --task "Add a queue?"
 python3 orchestrate.py dev  --mock --task "Fix off-by-one in foo()."
 python3 orchestrate.py dev  --mock --scenario escalate --task "Refactor bar."
-python3 orchestrate.py inv  --mock --task "Terminal drops from the RL on UH-1."
-python3 orchestrate.py inv  --mock --scenario arbitrate_stands --task "ES-3 TS2 logon dropped."
+python3 orchestrate.py inv  --mock --task "Sessions drop on host X after the 14:00 restart."
+python3 orchestrate.py inv  --mock --scenario arbitrate_stands --task "Requests time out on node 2."
 python3 orchestrate.py review     --mock --task "Review this design." --target DESIGN.md
 python3 orchestrate.py implreview --mock --task "Ready to implement?"  --target PLAN.md
 python3 orchestrate.py mrreview   --mock          # canned diff: no repo, refs or network
@@ -136,12 +165,12 @@ A root-cause investigation team that does **not** ship a fix — it produces a
    problem**, **derives each service's log location from the repos themselves**
    (systemd units, logging/ConfD config, code, `devtools` collectors) — the
    problem gives the hosts, not the paths — then reads those logs on the named
-   hosts (read-only, via `devtools/estella-ops` / `hub-phs-check`), correlates
-   log line → `repo/path:line`
+   hosts (read-only, via whatever collection tooling the workspace ships),
+   correlates log line → `repo/path:line`
    → mechanism → falsifier, and emits ranked hypotheses with a **per-repo
    guilty/cleared verdict** (no project is presumed innocent). It is the **only**
-   role that may edit/build, and **only** in `dataplane-phs-ng` / `dataplane-sdk`,
-   and only as temporary debug instrumentation to confirm/kill a hypothesis.
+   role that may edit/build, and **only** in the `dev_repos`, and only as temporary
+   debug instrumentation to confirm/kill a hypothesis.
 2. **Refuter** (Gemini) attacks every cycle and loops with the Investigator until
    it genuinely cannot break the chain (`NOT_REFUTED`); `REFUTED` /
    `INSUFFICIENT_EVIDENCE` sends it back.
@@ -185,9 +214,9 @@ severity-ranked list of remarks, written to `runs/<id>/artifacts/mr-review.md`
 (`--out PATH` copies it anywhere you like).
 
 ```bash
-python3 orchestrate.py mrreview --mr 174 --repo dataplane-phs-ng --fetch
-python3 orchestrate.py mrreview --base origin/main --head HEAD --repo dataplane-sdk
-python3 orchestrate.py mrreview --diff-file /tmp/change.patch --subject "mod1250 tx_mode"
+python3 orchestrate.py mrreview --mr 174 --repo service-a --fetch
+python3 orchestrate.py mrreview --base origin/main --head HEAD --repo sdk
+python3 orchestrate.py mrreview --diff-file /tmp/change.patch --subject "retry policy"
 ```
 
 The MR reaches the panel in one of three ways: `--mr <iid>` (branches read via
@@ -215,18 +244,26 @@ Properties worth knowing, because they are deliberate:
 ## Layout
 
 ```
-tools/orchestration/
+<tool>/                        REUSABLE — everything here works for any project
 ├─ orchestrate.py            entrypoint (doctor / chains / arch / dev / inv /
 │                            review / implreview / mrreview / resume / show)
 ├─ orchestrator/             config, verdicts, guard, transcript, adapters, engine, mr
 ├─ config/agents.json        agent↔model↔command binding (authoritative)
-├─ config/workflows.json     loop limits, step bindings, paths, guard, validation
-├─ roles/<Role Name>.md      role prompts (all agent reasoning lives here)
+├─ config/workflows.json     workflows: chains, step→role bindings, limits, rosters
+├─ config/project.example.json  template for the per-project layer
+├─ config/project.json       -> the real project layer (gitignored; usually a symlink)
+├─ roles/<Role Name>.md      BASE role prompts — identical for every project
 ├─ prompts/                  architecture-authoring wrapper (does not modify roles)
-├─ profiles/<name>/roles/    alternative role sets (inert unless roles_dir points at one)
 ├─ fixtures/<wf>/<name>.json scripted mock responses (pass, escalate)
-└─ runs/<run-id>/            full history (gitignored): run.json, events.jsonl,
-                             transcript.md, iterations/, artifacts/, disagreements.md, STATUS
+└─ runs/<run-id>/            default run history (gitignored), unless paths.runs_dir
+                             moves it out: run.json, events.jsonl, transcript.md,
+                             iterations/, artifacts/, disagreements.md, STATUS
+
+<project>/                     NOT reusable — lives with the project, never in the tool
+├─ project.json              paths, guard, and where the context files are
+├─ context.md                domain context appended to EVERY role
+├─ roles-context/<role>.md   extra context only that role sees
+└─ runs/                     run history, when paths.runs_dir points here
 ```
 
 ## Safety model

@@ -20,10 +20,10 @@ a consequence, and a fix is not a remark — drop it.
 Check the change against the contracts this workspace already ratified, when the
 repository carries them: the architecture docs and ADRs under `doc/architecture/`,
 the decisions-and-deviations log for the feature in flight, and the interface
-specification the change claims to implement (for hub-side work, the NCC<->PHS
-control-plane spec and the ConfD/YANG models are the contract, not the code that
-happens to be there). A diff that quietly deviates from a ratified decision is a
-finding even when the code itself is correct - say which decision and where.
+specification the change claims to implement - which is the contract, not the code
+that happens to be there. Your project context names the ones that apply here. A diff
+that quietly deviates from a ratified decision is a finding even when the code itself
+is correct - say which decision and where.
 
 ## What to look for
 
