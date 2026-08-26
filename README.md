@@ -37,6 +37,10 @@ Where each is configured: **Claude** — `claude` CLI session model (Opus 4.8) +
 the model). Bindings in `agents.json` are authoritative; role-file `model:` frontmatter
 is ignored.
 
+> **Setting this up, or running it:** [`docs/SETUP.md`](docs/SETUP.md) is the
+> step-by-step — what goes in the tool, what goes beside your project, how to launch
+> each workflow, and what the guard will stop.
+
 ## The per-project layer
 
 The split is the point: **this repository holds only what any project can reuse**
