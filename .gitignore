@@ -11,6 +11,7 @@ tmp/
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
 
 # Stray process output
 *.err
@@ -18,5 +19,10 @@ __pycache__/
 *.log
 
 # Local secrets: API keys are read from the environment, never committed.
+# deepseek.env / gemini.env are sourced from ~/.config/orchestration, not from here.
 .env
 *.env
+
+# Local backups and model/CLI caches
+*.bak
+*cache*.json

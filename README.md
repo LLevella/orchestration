@@ -1,10 +1,12 @@
 # Local AI Orchestration (dataplane workspace)
 
-A safe, local, multi-agent orchestrator that drives **architecture**,
-**development**, and **investigation** (root-cause) loops automatically,
-preserves every discussion and decision, enforces hard iteration limits, and
-stops with a successful conclusion (**PASS** / **READY_FOR_HUMAN_REVIEW** /
-**ROOT_CAUSE_ESTABLISHED** / **NO_DEFECT_FOUND**) or **HUMAN_REQUIRED**.
+A safe, local, multi-agent orchestrator that drives six loops automatically —
+**architecture**, **development**, **investigation** (root-cause), **review** (of
+an artifact), **implreview** (implementation readiness) and **mrreview** (a
+merge-request panel) — preserves every discussion and decision, enforces hard
+iteration limits, and stops with a successful conclusion (**PASS** /
+**READY_FOR_HUMAN_REVIEW** / **ROOT_CAUSE_ESTABLISHED** / **NO_DEFECT_FOUND** /
+**REVIEW_COMPLETE** / **IMPLREVIEW_COMPLETE**) or **HUMAN_REQUIRED**.
 
 This copy is configured for the **multi-repo `dataplane/` workspace**: the
 Developer actively edits the `dev_repos`, while the `analysis_repos` are
@@ -74,7 +76,7 @@ To retarget the workspace, edit `paths.dev_repos` / `paths.analysis_repos` in
 ## Quick start
 
 ```bash
-cd orchestration   # at the dataplane/ workspace root
+cd tools/orchestration   # under the dataplane/ workspace root
 
 # 1) Check what's installed / configured (never installs anything)
 python3 orchestrate.py doctor
@@ -86,6 +88,9 @@ python3 orchestrate.py dev  --mock --task "Fix off-by-one in foo()."
 python3 orchestrate.py dev  --mock --scenario escalate --task "Refactor bar."
 python3 orchestrate.py inv  --mock --task "Terminal drops from the RL on UH-1."
 python3 orchestrate.py inv  --mock --scenario arbitrate_stands --task "ES-3 TS2 logon dropped."
+python3 orchestrate.py review     --mock --task "Review this design." --target DESIGN.md
+python3 orchestrate.py implreview --mock --task "Ready to implement?"  --target PLAN.md
+python3 orchestrate.py mrreview   --mock          # canned diff: no repo, refs or network
 
 # 3) Inspect a run
 python3 orchestrate.py show <run-id>
@@ -164,16 +169,61 @@ the hypothesis dossier in run history (`artifacts/root-cause-final.md`,
 > Branch discipline is enforced in the role: a hypothesis built on the wrong ref
 > is rejected.
 
+### Review (`review`) and implementation review (`implreview`)
+`review` critiques ONE ARTIFACT (a design, a plan, a document) with three
+adversarial lenses — correctness, completeness, risk — plus an arbiter that ranks
+the findings into a must-fix list; `--iterate` adds a reviser and re-reviews until
+STRONG. `implreview` is the heavier 6-role, 3-stage readiness gate over an
+implementation plan (author ↔ dev+devops peers → tech lead → PM, arbiter on
+deadlock). Both take the artifact via `--target` (path or inline text) and end
+**REVIEW_COMPLETE** / **IMPLREVIEW_COMPLETE** or **HUMAN_REQUIRED**.
+
+### Merge-request review panel (`mrreview`)
+Four experts review the SAME merge request **independently** — no cross-talk, no
+iteration, no gate — and a moderator merges their opinions into one deduplicated,
+severity-ranked list of remarks, written to `runs/<id>/artifacts/mr-review.md`
+(`--out PATH` copies it anywhere you like).
+
+```bash
+python3 orchestrate.py mrreview --mr 174 --repo dataplane-phs-ng --fetch
+python3 orchestrate.py mrreview --base origin/main --head HEAD --repo dataplane-sdk
+python3 orchestrate.py mrreview --diff-file /tmp/change.patch --subject "mod1250 tx_mode"
+```
+
+The MR reaches the panel in one of three ways: `--mr <iid>` (branches read via
+`glab`, diffed locally), plain `--base/--head` refs (needs nothing but git), or
+`--diff-file` (needs neither git nor network). Whatever the entry point, reviewers
+see the same three-dot (merge-base) diff plus the commit list and diffstat, so
+commits the target branch gained meanwhile are never blamed on this MR.
+
+Properties worth knowing, because they are deliberate:
+- **The deliverable is the remarks list, not a verdict.** REQUEST_CHANGES from all
+  four still ends **REVIEW_COMPLETE** — the run succeeded in producing remarks.
+- **A dead vendor costs one opinion, not the run.** Two or more usable opinions
+  still produce the document; one produces it unmoderated and ends HUMAN_REQUIRED.
+- **The document names no model and no run** — reviewers are "Reviewer 1..4", in
+  call order. Provenance lives in the run dir (`opinion-N-<agent>.md`).
+- **The panel tally is computed, never asked of a model**, so the document's
+  headline cannot drift from the verdicts it lists.
+- **The review target need not be a watched repo.** A repo outside
+  `dev_repos`/`analysis_repos` is added to the git guard for that run.
+- **Unrelated edits elsewhere do not abort it.** A guard violation in a repo this
+  run is not reviewing is logged as out-of-scope activity (you, working in your own
+  tree during a 20-minute panel) instead of killing four paid-for reviews. A change
+  in the REVIEWED repo still aborts.
+
 ## Layout
 
 ```
-orchestration/
-├─ orchestrate.py            entrypoint (doctor / arch / dev / show)
-├─ orchestrator/             config, verdicts, guard, transcript, adapters, engine
+tools/orchestration/
+├─ orchestrate.py            entrypoint (doctor / chains / arch / dev / inv /
+│                            review / implreview / mrreview / resume / show)
+├─ orchestrator/             config, verdicts, guard, transcript, adapters, engine, mr
 ├─ config/agents.json        agent↔model↔command binding (authoritative)
 ├─ config/workflows.json     loop limits, step bindings, paths, guard, validation
 ├─ roles/<Role Name>.md      role prompts (all agent reasoning lives here)
 ├─ prompts/                  architecture-authoring wrapper (does not modify roles)
+├─ profiles/<name>/roles/    alternative role sets (inert unless roles_dir points at one)
 ├─ fixtures/<wf>/<name>.json scripted mock responses (pass, escalate)
 └─ runs/<run-id>/            full history (gitignored): run.json, events.jsonl,
                              transcript.md, iterations/, artifacts/, disagreements.md, STATUS
@@ -187,6 +237,20 @@ orchestration/
   **aborts the run** if anything changed (the delta is labelled by repo). Note
   this is *detect-and-abort* (post-hoc), not prevention — it stops the loop and
   records a `guard_violation`, but does not roll back a write.
+- **No branch switching, by anyone.** Branches are recorded around **every** step,
+  the Developer's editable one included, and a run aborts if a watched repo moved.
+  Switching branches mutates no file, so the tree snapshot above cannot see it —
+  and work that lands on the wrong base looks perfect in the diff.
+- **Reviewers see new files, not just their names.** Untracked files are rendered
+  as new-file diffs (bounded per file and in total, every omission stated), because
+  `git diff <baseline>` structurally omits what git does not track and a reviewer
+  cannot sign off on code it was never shown.
+- **Our own git calls ignore an inherited `GIT_DIR`/`GIT_INDEX_FILE`.** Otherwise a
+  suite run from a pre-commit hook retargets every `git -C <repo>` at the
+  commit-in-progress index and the guard aborts on a tree that never changed.
+- **Every role gets the global policy** (artifacts in English regardless of the
+  brief's language; never read a sibling workspace) appended last, after the role
+  file and any wrapper, so it wins.
 - **Fail-closed:** a real (non-mock) run refuses to start if the git guard is
   inactive — i.e. `guard.enabled=false` or **any** configured repo is not a
   valid git worktree — so read-only agents are never run unprotected. Override
