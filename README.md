@@ -11,7 +11,7 @@ Developer actively edits the `dev_repos`, while the `analysis_repos` are
 read-only context. See **[Workspace & repositories](#workspace--repositories)**.
 
 Control flow is deterministic Python (stdlib only). All reasoning lives in the
-agents and the role files under [`../roles`](../roles). The orchestrator only
+agents and the role files under [`roles/`](roles). The orchestrator only
 sequences steps, parses verdicts, enforces safety, and writes history.
 
 ## Agent ↔ role binding
@@ -172,6 +172,7 @@ orchestration/
 ├─ orchestrator/             config, verdicts, guard, transcript, adapters, engine
 ├─ config/agents.json        agent↔model↔command binding (authoritative)
 ├─ config/workflows.json     loop limits, step bindings, paths, guard, validation
+├─ roles/<Role Name>.md      role prompts (all agent reasoning lives here)
 ├─ prompts/                  architecture-authoring wrapper (does not modify roles)
 ├─ fixtures/<wf>/<name>.json scripted mock responses (pass, escalate)
 └─ runs/<run-id>/            full history (gitignored): run.json, events.jsonl,

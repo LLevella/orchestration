@@ -3,7 +3,7 @@
   "paths": {
     "_comment": "repo_root is the multi-repo workspace root and the cwd every agent CLI is launched in (so they can read all repos, roles, and docs). It is NOT itself a git repo. dev_repos = repos the Developer (Claude) MAY edit; analysis_repos = read-only context, never modified. Both lists are resolved relative to repo_root; the git guard watches ALL of them and capture_diff aggregates their diffs (each repo labelled writable/read-only).",
     "repo_root": "..",
-    "roles_dir": "../roles",
+    "roles_dir": "roles",
     "docs_architecture": "../docs/architecture",
     "dev_repos": ["dataplane-phs-ng", "dataplane-sdk"],
     "analysis_repos": ["MCD4_Lite", "ncc-core", "idu/sdk-s8000"]
