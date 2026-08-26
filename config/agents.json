@@ -39,7 +39,9 @@
         "Responsible Developer",
         "Root Cause Investigator",
         "Developer Verifier",
-        "Software Engineering Code Reviewer"
+        "Software Engineering Code Reviewer",
+        "Review Moderator",
+        "MR Review Expert"
       ]
     },
     "claude_sonnet": {
@@ -83,7 +85,9 @@
         "DevOps Reviewer",
         "Implementation Tech Lead",
         "Project Manager Gate",
-        "Implementation Review Arbiter"
+        "Implementation Review Arbiter",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     },
     "claude_reviewer": {
@@ -124,7 +128,9 @@
         "Review Reviser",
         "Advanced Developer Reviewer",
         "Implementation Architect",
-        "DevOps Reviewer"
+        "DevOps Reviewer",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     },
     "claude_haiku": {
@@ -172,7 +178,9 @@
         "DevOps Reviewer",
         "Implementation Tech Lead",
         "Project Manager Gate",
-        "Implementation Review Arbiter"
+        "Implementation Review Arbiter",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     },
     "claude_author": {
@@ -279,7 +287,9 @@
         "Adversarial Reviewer",
         "Review Arbiter",
         "Review Reviser",
-        "Implementation Tech Lead"
+        "Implementation Tech Lead",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     },
     "gemini": {
@@ -296,7 +306,9 @@
         "Adversarial Reviewer",
         "Review Arbiter",
         "Review Reviser",
-        "Implementation Review Arbiter"
+        "Implementation Review Arbiter",
+        "MR Review Expert",
+        "Review Moderator"
       ],
       "api_base": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
       "api_env": "GEMINI_API_KEY",
@@ -327,7 +339,9 @@
         "Review Arbiter",
         "Review Reviser",
         "Project Manager Gate",
-        "Technical Lead"
+        "Technical Lead",
+        "MR Review Expert",
+        "Review Moderator"
       ]
     }
   }

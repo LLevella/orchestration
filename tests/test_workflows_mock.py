@@ -20,7 +20,7 @@ SUCCESS = {"PASS", "READY_FOR_HUMAN_REVIEW", "ROOT_CAUSE_ESTABLISHED", "NO_DEFEC
            "REVIEW_COMPLETE", "IMPLREVIEW_COMPLETE"}
 # fixtures dirs use full workflow names; the CLI subcommand is the short form.
 CMD = {"architecture": "arch", "development": "dev", "investigation": "inv", "review": "review",
-       "implreview": "implreview"}
+       "implreview": "implreview", "mrreview": "mrreview"}
 
 
 def _run(workflow, scenario, extra=None):
@@ -136,11 +136,29 @@ class TestWorkflowsMock(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("Arbiter", out, out[-600:])
 
+    def test_mrreview_panel_writes_the_remarks_document(self):
+        # Four experts + moderator over a canned diff: REVIEW_COMPLETE, and the
+        # deliverable exists. The document is the point of the workflow, so a run that
+        # ends "successfully" without one is a failure.
+        rc, status, out = _run("mrreview", "pass")
+        self.assertEqual(status, "REVIEW_COMPLETE", out[-600:])
+        self.assertEqual(rc, 0)
+        self.assertIn("mr-review.md", out, out[-600:])
+
+    def test_mrreview_unmoderated_still_delivers_and_flags_the_human(self):
+        # Consolidation returns INSUFFICIENT_INPUT: the four opinions are never thrown
+        # away (the document holds them unmerged) but the run ends HUMAN_REQUIRED.
+        rc, status, out = _run("mrreview", "unmoderated")
+        self.assertEqual(status, "HUMAN_REQUIRED", out[-600:])
+        self.assertEqual(rc, 2)
+        self.assertIn("mr-review.md", out, out[-600:])
+
     def test_every_shipped_scenario_terminates_cleanly(self):
         # Regression net: every fixture in every workflow must reach a terminal status
         # with a clean exit code (0 success / 2 human-required) — never hang or crash.
         ran = 0
-        for wf in ("architecture", "development", "investigation", "review", "implreview"):
+        for wf in ("architecture", "development", "investigation", "review", "implreview",
+                   "mrreview"):
             for sc in _scenarios(wf):
                 rc, status, out = _run(wf, sc)
                 self.assertIsNotNone(status, f"{wf}/{sc}: no FINAL STATUS\n{out[-600:]}")

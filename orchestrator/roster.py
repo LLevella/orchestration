@@ -103,7 +103,11 @@ class Roster:
         self.chain = list(r.get("chain") or [])
         self.cells = list(r.get("cells") or [])
         self.pinned = dict(r.get("pinned") or {})
-        self.roles = {cell: (wf_block.get(cell) or {}).get("role") for cell in self.cells}
+        # isinstance: a cells entry that does not name a step block (a typo, a scalar
+        # like max_iterations) must read as "no declared role", not crash the assignment.
+        self.roles = {cell: (wf_block.get(cell) if isinstance(wf_block.get(cell), dict)
+                             else {}).get("role")
+                      for cell in self.cells}
         self.adapters = adapters
         self.exhausted: set[str] = set()
         self.enabled = bool(self.chain and self.cells)
@@ -125,7 +129,13 @@ class Roster:
     def _capable(self, agent: str, cell: str) -> bool:
         """Whether `agent`'s agents.json `roles` allowlist covers `cell`'s
         declared role. A cell with no declared role imposes no constraint
-        (back-compat for any workflow that doesn't set one)."""
+        (back-compat for any workflow that doesn't set one).
+
+        FAILS CLOSED on the agent side: an agent that declares no `roles` list at all
+        holds NO cell, rather than being eligible for every one of them. An agent added
+        to agents.json without its allowlist is then visibly unused ("no live agent for
+        role X") instead of silently landing in the editing Developer cell it was never
+        meant to hold. `orchestrate.py doctor` names any agent in that state."""
         role = self.roles.get(cell)
         if role is None:
             return True

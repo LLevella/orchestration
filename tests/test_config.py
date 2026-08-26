@@ -8,13 +8,14 @@ agents.json roles-allowlist miss (a role used in a workflow but not allowed for 
 import unittest
 
 from orchestrator.verdicts import ROLE_VERDICTS
-from orchestrator.config import load_config, RunContext
+from orchestrator.config import load_config, RunContext, WORKFLOWS as SHIPPED_WORKFLOWS
 
 WORKFLOWS = ("architecture", "development", "investigation", "review")
 # implreview uses a different arbiter convention (its arbiter is gemini; its independent
-# 4th-family gate is the deepseek/mistral GATING cell), so it is exempt from the
-# arbiter-is-4th-family test — but still covered by the consistency guard + a shape test.
-ALL_WORKFLOWS = WORKFLOWS + ("implreview",)
+# 4th-family gate is the deepseek/mistral GATING cell) and mrreview has no arbiter at all
+# (a panel of four peers plus a moderator, nothing to break a deadlock over), so both are
+# exempt from the arbiter-is-4th-family test — but still covered by the consistency guard.
+ALL_WORKFLOWS = SHIPPED_WORKFLOWS
 
 
 class TestConfig(unittest.TestCase):

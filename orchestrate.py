@@ -26,7 +26,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from orchestrator.adapters import build_adapters  # noqa: E402
-from orchestrator.config import BASE, ConfigError, RunContext, load_config, resolve_repos  # noqa: E402
+from orchestrator import mr as mrlib  # noqa: E402
+from orchestrator.config import (BASE, WORKFLOWS, ConfigError, RunContext,  # noqa: E402
+                                 load_config, resolve_repos)
 from orchestrator.engine import HUMAN_REQUIRED, SUCCESS_STATUSES, Engine  # noqa: E402
 from orchestrator.guard import GitGuard  # noqa: E402
 from orchestrator.transcript import Transcript  # noqa: E402
@@ -55,22 +57,26 @@ def _install_interrupt_handler(tx):
         signal.signal(_sig, _handler)
 
 
-def _build_guard(workflows_cfg):
-    """Guard watches every configured repo (dev + analysis); cwd is the workspace root."""
+def _build_guard(workflows_cfg, extra_repos=()):
+    """Guard watches every configured repo (dev + analysis), plus any run-scoped repo
+    the caller adds - an mrreview target outside the watched set is guarded for that run
+    so a read-only reviewer that writes to it is still caught. cwd is the workspace root."""
     repos = resolve_repos(workflows_cfg)
     guard_cfg = workflows_cfg.get("guard", {})
-    guard = GitGuard([(label, path) for label, path, _ in repos],
+    guard = GitGuard([(label, path) for label, path, _ in repos] + list(extra_repos),
                      guard_cfg.get("exclude_prefix", "orchestration"),
                      guard_cfg.get("enabled", True))
     repo_root = str((BASE / workflows_cfg["paths"]["repo_root"]).resolve())
     return guard, repos, repo_root
 
 
-def _read_task(args) -> str:
+def _read_task(args, required=True) -> str:
     if args.task_file:
         return Path(args.task_file).read_text(encoding="utf-8")
     if args.task:
         return args.task
+    if not required:
+        return ""   # an MR review's brief is the merge request itself
     sys.exit("error: provide --task \"...\" or --task-file PATH")
 
 
@@ -129,12 +135,17 @@ def _print_agents(adapters):
             print(f"  {name:15s} DISABLED - {ad.cfg.get('_disabled_reason', 'disabled in config')}{edit}")
             continue
         any_missing |= not ok
-        print(f"  {name:15s} {'OK ' if ok else 'MISSING'} - {reason}{edit}")
+        # A missing `roles` allowlist is not a CLI problem, so it never shows up as
+        # MISSING - but roster._capable fails closed on it, so the agent silently holds
+        # no cell in any workflow. Name it here rather than let a real run be surprised.
+        no_roles = "" if (ad.cfg.get("roles") or []) else \
+            "  <- no `roles` in agents.json: holds NO cell in any workflow"
+        print(f"  {name:15s} {'OK ' if ok else 'MISSING'} - {reason}{edit}{no_roles}")
     return any_missing
 
 
 _WF_ALIASES = {"arch": "architecture", "dev": "development", "inv": "investigation",
-               "rev": "review", "impl": "implreview"}
+               "rev": "review", "impl": "implreview", "mr": "mrreview"}
 
 
 def _agent_model(cfg: dict) -> str:
@@ -221,8 +232,7 @@ def cmd_chains(args):
           f"{_agent_model(arb_cfg)})  <- swappable independent family\n")
     _print_cast(agents)
 
-    selected = [_WF_ALIASES[args.workflow]] if getattr(args, "workflow", None) else \
-        ["architecture", "development", "investigation", "review", "implreview"]
+    selected = [_WF_ALIASES[args.workflow]] if getattr(args, "workflow", None) else list(WORKFLOWS)
     print("Chains (steps in order — agent  →  role):")
     for wf in selected:
         _print_chain(wf, workflows_cfg.get(wf, {}), agents)
@@ -250,7 +260,7 @@ def cmd_doctor(args):
         print(f"  {'OK ' if present else 'MISSING'}  {role}")
 
     print("\nMock scenarios:")
-    for wf in ("architecture", "development", "investigation", "review", "implreview"):
+    for wf in WORKFLOWS:
         d = BASE / "fixtures" / wf
         names = sorted(p.stem for p in d.glob("*.json")) if d.exists() else []
         print(f"  {wf:13s}: {names}")
@@ -260,16 +270,65 @@ def cmd_doctor(args):
           "NO - install/configure the MISSING agents above." if any_missing else "YES.")
 
 
+_MOCK_DIFF = ("--- a/mock/service.py\n+++ b/mock/service.py\n@@ -1,3 +1,4 @@\n"
+              " def handler(req):\n-    return backend.fetch(req.id)\n"
+              "+    # mock change under review\n+    return backend.fetch(req.id, retry=True)\n")
+
+
+def _resolve_mr(workflows_cfg, args):
+    """Turn the CLI's MR arguments into the change the panel reviews.
+
+    A --mock run with no MR arguments reviews a canned diff, so the whole chain is
+    exercisable with no repo, no refs, and no network. Any explicitly named MR
+    source is honoured even under --mock.
+    """
+    named = args.mr or args.diff_file or args.base or args.head
+    if args.mock and not named:
+        return mrlib.MRContext(subject="mock merge request", repo_label="(mock)",
+                               repo_path=None, base=None, head=None, base_sha=None,
+                               head_sha=None, diff=_MOCK_DIFF, source="file")
+    try:
+        return mrlib.resolve(workflows_cfg, mr=args.mr, base=args.base, head=args.head,
+                             repo=args.repo, diff_file=args.diff_file,
+                             fetch=args.fetch, subject=args.subject)
+    except mrlib.MRResolutionError as e:
+        sys.exit(f"error: {e}")
+
+
+def _deliver_document(tx_dir, out_path):
+    """Copy the remarks document to the path the human asked for, if any."""
+    src = tx_dir / "artifacts" / "mr-review.md"
+    if not src.exists():
+        print("[orchestrate] no remarks document was produced.")
+        return
+    print(f"[orchestrate]   REMARKS     : {src}")
+    if not out_path:
+        return
+    dest = Path(out_path)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    except OSError as e:
+        print(f"[orchestrate] WARNING: could not write --out {dest}: {e}")
+        return
+    print(f"[orchestrate]   copied to   : {dest}")
+
+
 def _run(workflow, args):
     agents_cfg, workflows_cfg = load_config()
-    task = _read_task(args)
+    task = _read_task(args, required=(workflow != "mrreview"))
     scenario = None
     scenario_name = "(real)"
     if args.mock:
         scenario_name = args.scenario or workflows_cfg[workflow]["default_mock_scenario"]
         scenario = _load_scenario(workflow, scenario_name)
 
-    guard, _repos, repo_root = _build_guard(workflows_cfg)
+    mr = _resolve_mr(workflows_cfg, args) if workflow == "mrreview" else None
+    extra_guarded = ([(mr.repo_label, mr.repo_path)]
+                     if mr and mr.repo_path and not mr.guard_watched else [])
+    guard, _repos, repo_root = _build_guard(workflows_cfg, extra_guarded)
+    if extra_guarded:
+        print(f"[orchestrate] guarding review target {extra_guarded[0][0]} for this run")
     # Fail-closed: a real run must not let read-only agents touch code unprotected.
     # Mock runs perform no edits, so they are always allowed.
     if not args.mock and not guard.active and not args.allow_unguarded:
@@ -311,13 +370,18 @@ def _run(workflow, args):
                        review_max=getattr(args, "max_iterations", None))
 
     print(f"[orchestrate] {workflow} run {run_id} (mock={args.mock}, scenario={scenario_name})")
+    if mr:
+        for line in mr.header_lines():
+            print(f"[orchestrate]   {line}")
     status = engine.run(task, arch_ref=arch_ref, target=target,
                         iterate=getattr(args, "iterate", False),
-                        max_iters=getattr(args, "max_iterations", None))
+                        max_iters=getattr(args, "max_iterations", None), mr=mr)
     print(f"[orchestrate] FINAL STATUS: {status}")
     print(f"[orchestrate] history: {tx.dir}")
     print(f"[orchestrate]   STATUS file : {tx.dir / 'STATUS'}")
     print(f"[orchestrate]   transcript  : {tx.dir / 'transcript.md'}")
+    if workflow == "mrreview":
+        _deliver_document(tx.dir, getattr(args, "out", None))
     # exit codes: 0 for a successful conclusion (PASS / READY_FOR_HUMAN_REVIEW /
     # ROOT_CAUSE_ESTABLISHED / NO_DEFECT_FOUND), 2 for HUMAN_REQUIRED.
     return 0 if status in SUCCESS_STATUSES else 2
@@ -429,31 +493,54 @@ def cmd_resume(args):
     elif workflow in ("review", "implreview"):
         target = _resolve_arch(meta.get("target"))
 
+    mr = None
+    if workflow == "mrreview":
+        # The refs are re-diffed against the CURRENT repo state: if the author pushed
+        # while the run was down, the resumed panel reviews the newer code while the
+        # already-journaled opinions describe the older one. Say so rather than hide it.
+        spec = meta.get("mr") or {}
+        if spec.get("source") == "file":
+            sys.exit("error: this review ran on a patch file; re-run it with --diff-file "
+                     "instead of resuming (the patch is not stored in the run).")
+        try:
+            mr = mrlib.resolve(workflows_cfg, mr=spec.get("mr_iid"), base=spec.get("base"),
+                               head=spec.get("head"), repo=spec.get("repo_label"),
+                               subject=spec.get("subject"))
+        except mrlib.MRResolutionError as e:
+            sys.exit(f"error: cannot re-resolve the merge request for this resume: {e}")
+        print("[orchestrate] NOTE: the diff was re-read from the repository just now; "
+              "if the branch moved since the interrupted run, earlier opinions describe "
+              "the older code.")
+
     print(f"[orchestrate] RESUME {workflow} from {args.run_id} as {run_id} "
           f"({len(cache)} step(s) replayed from journal)")
     status = engine.run(task, arch_ref=arch_ref, target=target,
                         iterate=meta.get("review_iterate", False),
-                        max_iters=meta.get("review_max"))
+                        max_iters=meta.get("review_max"), mr=mr)
     print(f"[orchestrate] FINAL STATUS: {status}")
     print(f"[orchestrate] history: {tx.dir}")
+    if workflow == "mrreview":
+        _deliver_document(tx.dir, None)
     return 0 if status in SUCCESS_STATUSES else 2
 
 
 def main():
-    p = argparse.ArgumentParser(description="Local AI orchestration for phs-rs.")
+    p = argparse.ArgumentParser(description="Local AI orchestration for this workspace.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("doctor", help="report CLI/key availability and readiness")
 
     spc = sub.add_parser("chains", help="show agent<->role chains and substitution points")
-    spc.add_argument("workflow", nargs="?", choices=("arch", "dev", "inv", "rev", "impl"),
+    spc.add_argument("workflow", nargs="?",
+                     choices=("arch", "dev", "inv", "rev", "impl", "mr"),
                      help="limit to one workflow (default: all)")
 
     for name, helptext in (("arch", "run the architecture workflow"),
                            ("dev", "run the development workflow"),
                            ("inv", "run the investigation (root-cause) workflow"),
                            ("review", "run the review (adversarial panel) workflow"),
-                           ("implreview", "run the implementation-readiness review (6-role, 3-stage cyclic gate)")):
+                           ("implreview", "run the implementation-readiness review (6-role, 3-stage cyclic gate)"),
+                           ("mrreview", "run the merge-request review panel (4 independent experts + moderator)")):
         sp = sub.add_parser(name, help=helptext)
         sp.add_argument("--task", help="task description")
         sp.add_argument("--task-file", help="path to a task description file")
@@ -480,6 +567,18 @@ def main():
                             help="artifact to review: file path or inline text (defaults to --task)")
             sp.add_argument("--max-iterations", type=int,
                             help="max author-revision rounds (default: config max_iterations=5)")
+        if name == "mrreview":
+            sp.add_argument("--mr", help="GitLab MR iid; its branches are read via `glab` "
+                                        "and diffed locally")
+            sp.add_argument("--base", help="target ref of the MR (default: origin/main)")
+            sp.add_argument("--head", help="source ref of the MR (default: HEAD)")
+            sp.add_argument("--repo", help="repo holding the MR: a watched repo's label, or any "
+                                           "git worktree path (default: the single dev repo)")
+            sp.add_argument("--diff-file", help="review a patch file instead of git refs")
+            sp.add_argument("--fetch", action="store_true",
+                            help="`git fetch --prune origin` first (updates refs, never the tree)")
+            sp.add_argument("--subject", help="how to name the change in the document")
+            sp.add_argument("--out", help="also write the remarks document to this path")
 
     spr = sub.add_parser("resume", help="resume an interrupted run from its last completed step")
     spr.add_argument("run_id", help="the interrupted run to resume")
@@ -509,6 +608,8 @@ def main():
             sys.exit(_run("review", args))
         elif args.cmd == "implreview":
             sys.exit(_run("implreview", args))
+        elif args.cmd == "mrreview":
+            sys.exit(_run("mrreview", args))
         elif args.cmd == "resume":
             sys.exit(cmd_resume(args))
         elif args.cmd == "show":
