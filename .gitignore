@@ -14,3 +14,7 @@ tmp/
 # Model/CLI caches
 *cache*.json
 models_cache.json
+
+# Local backups of config files
+*.bak
+.ruff_cache/

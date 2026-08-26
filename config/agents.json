@@ -1,254 +1,257 @@
 {
-  "_comment": "Authoritative model<->CLI binding. Role-file frontmatter `model:` is intentionally ignored. Command templates use {prompt} and {system} placeholders; tune them once the real CLIs are installed. None of these are assumed present - the orchestrator detects missing commands and fails gracefully. NOTE: the per-agent `roles` list is ADVISORY documentation only (nothing enforces it); which agent fills which role is governed at run time by each workflow's `roster` block in workflows.json (the availability-resolved shift-left chain). `disabled: true` removes an agent from all rosters (the chain shifts left around it).",
-  "agents": {
-    "claude": {
-      "transport": "cli",
-      "command": [
-        "/home/irina/.nvm/versions/node/v22.23.1/bin/claude",
-        "-p",
-        "--strict-mcp-config",
-        "{prompt}"
-      ],
-      "stdin": true,
-      "usage_format": "claude_json",
-      "system_arg": [
-        "--append-system-prompt",
-        "{system}"
-      ],
-      "edit_args": [
-        "--permission-mode",
-        "bypassPermissions"
-      ],
-      "_read_only_comment": "read_only_args is used whenever this agent runs a NON-editing role (Code Reviewer, Developer Verifier). bypassPermissions alone still PERMITS edits (it only skips prompts) \u2014 a 2026-06-15 inv run aborted when a read-only Claude refuter edited the tree. --disallowedTools hard-removes the edit tools so a read-only role physically cannot author/modify code; Bash/Read/Grep stay available for ssh+log diagnostics, and the git guard remains the backstop against bash-level writes.",
-      "read_only_args": [
-        "--permission-mode",
-        "bypassPermissions",
-        "--disallowedTools",
-        "Edit Write NotebookEdit"
-      ],
-      "can_edit": true,
-      "timeout_s": 2400,
-      "env": {
-        "MAX_THINKING_TOKENS": "16000"
-      },
-      "_env_comment": "MAX_THINKING_TOKENS=15000 ('think hard' level) for the Developer. Chosen over 31999 ('ultrathink') because ultrathink made dev steps slow enough to hit the per-step timeout on heavier tasks and is more exposed to session/context rollover; 15000 keeps strong reasoning while steps stay fast. claude CLI has no effort flag, so it is set via env.",
-      "roles": [
-        "Software Engineering Developer",
-        "Responsible Developer",
-        "Root Cause Investigator",
-        "Developer Verifier",
-        "Software Engineering Code Reviewer",
-        "MR Review Expert",
-        "Review Moderator"
-      ]
-    },
-    "claude_sonnet": {
-      "_comment": "Claude Sonnet 4.6 as a Claude OPPONENT (Hypothesis Refuter / Adversarial Verifier) \u2014 a distinct, lighter Claude model attacking the Opus investigator's hypothesis (intra-family diversity). Runs at MAXIMUM reasoning effort (MAX_THINKING_TOKENS=31999, ultrathink): per Irina 2026-06-15, a Claude assigned to an opponent role always gets max effort so a lighter/same-family skeptic still attacks hard. Read-only; never builds, so ultrathink does not risk a build-step timeout.",
-      "transport": "cli",
-      "command": [
-        "/home/irina/.nvm/versions/node/v22.23.1/bin/claude",
-        "-p",
-        "--strict-mcp-config",
-        "{prompt}",
-        "--model",
-        "claude-sonnet-4-6"
-      ],
-      "stdin": true,
-      "usage_format": "claude_json",
-      "system_arg": [
-        "--append-system-prompt",
-        "{system}"
-      ],
-      "edit_args": [
-        "--permission-mode",
-        "bypassPermissions"
-      ],
-      "read_only_args": [
-        "--permission-mode",
-        "bypassPermissions",
-        "--disallowedTools",
-        "Edit Write NotebookEdit"
-      ],
-      "can_edit": false,
-      "timeout_s": 2400,
-      "env": {
-        "MAX_THINKING_TOKENS": "31999"
-      },
-      "roles": [
-        "Hypothesis Refuter",
-        "Adversarial Verifier",
-        "MR Review Expert",
-        "Review Moderator"
-      ]
-    },
-    "claude_reviewer": {
-      "_comment": "Opus 4.8 as the REVIEWER (dev Code Reviewer + arch Developer Verifier) at MAXIMUM reasoning effort (MAX_THINKING_TOKENS=31999, 'ultrathink'). Per Irina 2026-06-15: developers peer-review each other (reviewer=Claude), and since the dev reviewer is the same model family as the developer, we offset the shared-blind-spot risk by running the reviewer at max thinking budget. Read-only; the reviewer never builds (no cargo), so ultrathink does not risk the dev-step timeout that capped the Developer at 16k.",
-      "transport": "cli",
-      "command": [
-        "/home/irina/.nvm/versions/node/v22.23.1/bin/claude",
-        "-p",
-        "--strict-mcp-config",
-        "{prompt}"
-      ],
-      "stdin": true,
-      "usage_format": "claude_json",
-      "system_arg": [
-        "--append-system-prompt",
-        "{system}"
-      ],
-      "edit_args": [
-        "--permission-mode",
-        "bypassPermissions"
-      ],
-      "read_only_args": [
-        "--permission-mode",
-        "bypassPermissions",
-        "--disallowedTools",
-        "Edit Write NotebookEdit"
-      ],
-      "can_edit": false,
-      "timeout_s": 2400,
-      "env": {
-        "MAX_THINKING_TOKENS": "31999"
-      },
-      "roles": [
-        "Software Engineering Code Reviewer",
-        "Developer Verifier",
-        "MR Review Expert",
-        "Review Moderator"
-      ]
-    },
-    "claude_haiku": {
-      "_comment": "Claude Haiku 4.5 \u2014 the always-available TAIL of every roster chain. Reached only when the stronger members (opus/codex/gemini/deepseek/sonnet) are all unavailable; a lightweight Claude that keeps a workflow running (degraded) rather than aborting. Runs at MAXIMUM reasoning effort (MAX_THINKING_TOKENS=31999, ultrathink) \u2014 per Irina 2026-06-15, a Claude in an opponent role always gets max effort; harmless (and helpful) for the judge roles it also covers. Read-only by default; the roster never assigns it the editing Developer/Investigator cell unless it is the only live Claude left.",
-      "transport": "cli",
-      "command": [
-        "/home/irina/.nvm/versions/node/v22.23.1/bin/claude",
-        "-p",
-        "--strict-mcp-config",
-        "{prompt}",
-        "--model",
-        "claude-haiku-4-5-20251001"
-      ],
-      "stdin": true,
-      "usage_format": "claude_json",
-      "system_arg": [
-        "--append-system-prompt",
-        "{system}"
-      ],
-      "edit_args": [
-        "--permission-mode",
-        "bypassPermissions"
-      ],
-      "read_only_args": [
-        "--permission-mode",
-        "bypassPermissions",
-        "--disallowedTools",
-        "Edit Write NotebookEdit"
-      ],
-      "can_edit": false,
-      "timeout_s": 2400,
-      "env": {
-        "MAX_THINKING_TOKENS": "31999"
-      },
-      "roles": [
-        "Hypothesis Refuter",
-        "Adversarial Verifier",
-        "Arbitration Reviewer",
-        "Investigation Arbiter",
-        "Technical Lead",
-        "System Architect",
-        "MR Review Expert",
-        "Review Moderator"
-      ]
-    },
-    "codex": {
-      "_note": "Millennium copy: Codex is used as a read-only architecture/review agent through the local Codex CLI.",
-      "disabled": false,
-      "_disabled_note": "2026-08-15: re-enabled — Ирина сменила аккаунт (свежая квота), codex снова архитектор. Ранее был отключён из-за usage-limit; кэш-схема models_cache.json ('missing base_instructions') чинилась регенерацией кэша.",
-      "transport": "cli",
-      "command": [
-        "codex",
-        "exec"
-      ],
-      "system_arg": [],
-      "stdin": true,
-      "_read_only_comment": "read-only roles (Architect/Code Reviewer/Verifier/Refuter) must NOT write the tree. --dangerously-bypass-approvals-and-sandbox DISABLES the sandbox so codex CAN edit, relying only on the git-guard \u2014 a 2026-06-22 arch-author run aborted HUMAN_REQUIRED when codex wrote the tree. --sandbox read-only physically blocks writes while keeping reads/analysis; codex exec stays headless. --skip-git-repo-check is REQUIRED because the agent cwd is the multi-repo workspace root which is NOT itself a git repo (codex refuses to run in an untrusted/non-git dir otherwise; the old bypass flag implied this skip). Codex equivalent of the Claude --disallowedTools approach above.",
-      "read_only_args": [
-        "--sandbox",
-        "read-only",
-        "--skip-git-repo-check"
-      ],
-      "edit_args": [],
-      "can_edit": false,
-      "timeout_s": 1800,
-      "roles": [
-        "System Architect",
-        "Software Engineering Code Reviewer",
-        "Adversarial Verifier",
-        "Hypothesis Refuter",
-        "MR Review Expert",
-        "Review Moderator"
-      ]
-    },
-    "gemini": {
-      "disabled": false,
-      "transport": "api",
-      "api_base": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      "api_env": "GEMINI_API_KEY",
-      "model": "gemini-2.5-flash",
-      "cli_command": [
-        "/home/irina/.nvm/versions/node/v22.23.1/bin/gemini",
-        "-p",
-        "",
-        "-m",
-        "gemini-2.5-flash"
-      ],
-      "system_arg": [],
-      "stdin": true,
-      "read_only_args": [
-        "--approval-mode",
-        "yolo",
-        "--skip-trust"
-      ],
-      "edit_args": [],
-      "can_edit": false,
-      "timeout_s": 1800,
-      "roles": [
-        "System Architecture Reviewer",
-        "Technical Lead",
-        "Hypothesis Refuter",
-        "Adversarial Verifier",
-        "MR Review Expert",
-        "Review Moderator"
-      ],
-      "env": {
-        "GEMINI_CLI_TRUST_WORKSPACE": "true"
-      },
-      "_note": "2026-07-17: ENABLED via Google AI Studio API key in orchestration/gemini.env (sourced by ~/.bashrc). OAuth/GCA free tier is dead (UNSUPPORTED_CLIENT); the API key authenticates fine. Model pinned to gemini-2.5-flash because gemini-pro-latest returns 429 TerminalQuotaError on the free tier (pro quota ~0); flash has real free quota. If pro is ever needed, add billing to the key. 2026-08-21: transport switched cli -> api, because the CLI does not stay on the model it is given. An MR-review step died with \"429 ... generate_content_free_tier_requests, limit: 20, model: gemini-3.5-flash\" although the command pins -m gemini-2.5-flash: this key has effectively NO free allowance on 3.5-flash (a single one-word request to it 429s), while gemini-2.5-flash serves the same 33.6k-token review prompt over the API in ~22s. Checked the same day: gemini-3.1-pro-preview and gemini-pro-latest also 429 (free-tier pro quota is 0) and gemini-2.5-pro is 404 \"no longer available to new users\" \u2014 so 2.5-flash is not a compromise, it is the ceiling this key can actually reach. The API transport sends one request per step on the model we asked for, with no fallback of its own. Cost: no file access \u2014 gemini reviews what is in the prompt. `cli_command` below is kept so flipping transport back to \"cli\" restores the old behaviour."
-    },
-    "deepseek": {
-      "_comment": "Independent 4th-family arbiter. Two transports supported: api (key in api_env) or cli (for example a local model). 2026-08-21: GET /models on this key returns exactly deepseek-v4-flash, deepseek-v4-pro and deepseek-v4-flash-vision-exp \u2014 v4-pro below is the strongest model the account can reach, so there is no upgrade to make here.",
-      "transport": "api",
-      "api_base": "https://api.deepseek.com/chat/completions",
-      "api_env": "DEEPSEEK_API_KEY",
-      "model": "deepseek-v4-pro",
-      "cli_command": [
-        "ollama",
-        "run",
-        "deepseek-r1",
-        "{prompt}"
-      ],
-      "system_arg": [],
-      "read_only_args": [],
-      "edit_args": [],
-      "can_edit": false,
-      "roles": [
-        "Arbitration Reviewer",
-        "Investigation Arbiter",
-        "Adversarial Verifier",
-        "MR Review Expert",
-        "Review Moderator"
-      ]
-    }
+ "_comment": "Authoritative model<->CLI binding. Role-file frontmatter `model:` is intentionally ignored. Command templates use {prompt} and {system} placeholders; tune them once the real CLIs are installed. None of these are assumed present - the orchestrator detects missing commands and fails gracefully. NOTE: the per-agent `roles` list is ADVISORY documentation only (nothing enforces it); which agent fills which role is governed at run time by each workflow's `roster` block in workflows.json (the availability-resolved shift-left chain). `disabled: true` removes an agent from all rosters (the chain shifts left around it).",
+ "agents": {
+  "claude": {
+   "transport": "cli",
+   "command": [
+    "/home/irina/.nvm/versions/node/v22.23.1/bin/claude",
+    "-p",
+    "--strict-mcp-config",
+    "--model",
+    "claude-opus-5",
+    "{prompt}"
+   ],
+   "stdin": true,
+   "usage_format": "claude_json",
+   "system_arg": [
+    "--append-system-prompt",
+    "{system}"
+   ],
+   "edit_args": [
+    "--permission-mode",
+    "bypassPermissions"
+   ],
+   "_read_only_comment": "read_only_args is used whenever this agent runs a NON-editing role (Code Reviewer, Developer Verifier). bypassPermissions alone still PERMITS edits (it only skips prompts) — a 2026-06-15 inv run aborted when a read-only Claude refuter edited the tree. --disallowedTools hard-removes the edit tools so a read-only role physically cannot author/modify code; Bash/Read/Grep stay available for ssh+log diagnostics, and the git guard remains the backstop against bash-level writes.",
+   "read_only_args": [
+    "--permission-mode",
+    "bypassPermissions",
+    "--disallowedTools",
+    "Edit Write NotebookEdit"
+   ],
+   "can_edit": true,
+   "timeout_s": 2400,
+   "env": {
+    "MAX_THINKING_TOKENS": "16000"
+   },
+   "_env_comment": "MAX_THINKING_TOKENS=15000 ('think hard' level) for the Developer. Chosen over 31999 ('ultrathink') because ultrathink made dev steps slow enough to hit the per-step timeout on heavier tasks and is more exposed to session/context rollover; 15000 keeps strong reasoning while steps stay fast. claude CLI has no effort flag, so it is set via env.",
+   "roles": [
+    "Software Engineering Developer",
+    "Responsible Developer",
+    "Root Cause Investigator",
+    "Developer Verifier",
+    "Software Engineering Code Reviewer",
+    "MR Review Expert",
+    "Review Moderator"
+   ],
+   "_model_pin_comment": "2026-08-26: модель роли разработчика ЗАКРЕПЛЕНА на opus. Аккаунтная модель по умолчанию исчерпала лимит, и прогоны падали на первой итерации с 429 ещё до единой строки кода. Права и список ролей НЕ менялись — правом писать по-прежнему обладает только этот агент. Снять закрепление, когда модель по умолчанию снова устроит."
+  },
+  "claude_sonnet": {
+   "_comment": "Claude Sonnet 4.6 as a Claude OPPONENT (Hypothesis Refuter / Adversarial Verifier) — a distinct, lighter Claude model attacking the Opus investigator's hypothesis (intra-family diversity). Runs at MAXIMUM reasoning effort (MAX_THINKING_TOKENS=31999, ultrathink): per Irina 2026-06-15, a Claude assigned to an opponent role always gets max effort so a lighter/same-family skeptic still attacks hard. Read-only; never builds, so ultrathink does not risk a build-step timeout.",
+   "transport": "cli",
+   "command": [
+    "/home/irina/.nvm/versions/node/v22.23.1/bin/claude",
+    "-p",
+    "--strict-mcp-config",
+    "{prompt}",
+    "--model",
+    "claude-sonnet-4-6"
+   ],
+   "stdin": true,
+   "usage_format": "claude_json",
+   "system_arg": [
+    "--append-system-prompt",
+    "{system}"
+   ],
+   "edit_args": [
+    "--permission-mode",
+    "bypassPermissions"
+   ],
+   "read_only_args": [
+    "--permission-mode",
+    "bypassPermissions",
+    "--disallowedTools",
+    "Edit Write NotebookEdit"
+   ],
+   "can_edit": false,
+   "timeout_s": 2400,
+   "env": {
+    "MAX_THINKING_TOKENS": "31999"
+   },
+   "roles": [
+    "Hypothesis Refuter",
+    "Adversarial Verifier",
+    "MR Review Expert",
+    "Review Moderator"
+   ]
+  },
+  "claude_reviewer": {
+   "_comment": "Opus 4.8 as the REVIEWER (dev Code Reviewer + arch Developer Verifier) at MAXIMUM reasoning effort (MAX_THINKING_TOKENS=31999, 'ultrathink'). Per Irina 2026-06-15: developers peer-review each other (reviewer=Claude), and since the dev reviewer is the same model family as the developer, we offset the shared-blind-spot risk by running the reviewer at max thinking budget. Read-only; the reviewer never builds (no cargo), so ultrathink does not risk the dev-step timeout that capped the Developer at 16k.",
+   "transport": "cli",
+   "command": [
+    "/home/irina/.nvm/versions/node/v22.23.1/bin/claude",
+    "-p",
+    "--strict-mcp-config",
+    "{prompt}"
+   ],
+   "stdin": true,
+   "usage_format": "claude_json",
+   "system_arg": [
+    "--append-system-prompt",
+    "{system}"
+   ],
+   "edit_args": [
+    "--permission-mode",
+    "bypassPermissions"
+   ],
+   "read_only_args": [
+    "--permission-mode",
+    "bypassPermissions",
+    "--disallowedTools",
+    "Edit Write NotebookEdit"
+   ],
+   "can_edit": false,
+   "timeout_s": 2400,
+   "env": {
+    "MAX_THINKING_TOKENS": "31999"
+   },
+   "roles": [
+    "Software Engineering Code Reviewer",
+    "Developer Verifier",
+    "MR Review Expert",
+    "Review Moderator"
+   ]
+  },
+  "claude_haiku": {
+   "_comment": "Claude Haiku 4.5 — the always-available TAIL of every roster chain. Reached only when the stronger members (opus/codex/gemini/deepseek/sonnet) are all unavailable; a lightweight Claude that keeps a workflow running (degraded) rather than aborting. Runs at MAXIMUM reasoning effort (MAX_THINKING_TOKENS=31999, ultrathink) — per Irina 2026-06-15, a Claude in an opponent role always gets max effort; harmless (and helpful) for the judge roles it also covers. Read-only by default; the roster never assigns it the editing Developer/Investigator cell unless it is the only live Claude left.",
+   "transport": "cli",
+   "command": [
+    "/home/irina/.nvm/versions/node/v22.23.1/bin/claude",
+    "-p",
+    "--strict-mcp-config",
+    "{prompt}",
+    "--model",
+    "claude-haiku-4-5-20251001"
+   ],
+   "stdin": true,
+   "usage_format": "claude_json",
+   "system_arg": [
+    "--append-system-prompt",
+    "{system}"
+   ],
+   "edit_args": [
+    "--permission-mode",
+    "bypassPermissions"
+   ],
+   "read_only_args": [
+    "--permission-mode",
+    "bypassPermissions",
+    "--disallowedTools",
+    "Edit Write NotebookEdit"
+   ],
+   "can_edit": false,
+   "timeout_s": 2400,
+   "env": {
+    "MAX_THINKING_TOKENS": "31999"
+   },
+   "roles": [
+    "Hypothesis Refuter",
+    "Adversarial Verifier",
+    "Arbitration Reviewer",
+    "Investigation Arbiter",
+    "Technical Lead",
+    "System Architect",
+    "MR Review Expert",
+    "Review Moderator"
+   ]
+  },
+  "codex": {
+   "_note": "Millennium copy: Codex is used as a read-only architecture/review agent through the local Codex CLI.",
+   "disabled": false,
+   "_disabled_note": "2026-08-15: re-enabled — Ирина сменила аккаунт (свежая квота), codex снова архитектор. Ранее был отключён из-за usage-limit; кэш-схема models_cache.json ('missing base_instructions') чинилась регенерацией кэша.",
+   "transport": "cli",
+   "command": [
+    "codex",
+    "exec"
+   ],
+   "system_arg": [],
+   "stdin": true,
+   "_read_only_comment": "read-only roles (Architect/Code Reviewer/Verifier/Refuter) must NOT write the tree. --dangerously-bypass-approvals-and-sandbox DISABLES the sandbox so codex CAN edit, relying only on the git-guard — a 2026-06-22 arch-author run aborted HUMAN_REQUIRED when codex wrote the tree. --sandbox read-only physically blocks writes while keeping reads/analysis; codex exec stays headless. --skip-git-repo-check is REQUIRED because the agent cwd is the multi-repo workspace root which is NOT itself a git repo (codex refuses to run in an untrusted/non-git dir otherwise; the old bypass flag implied this skip). Codex equivalent of the Claude --disallowedTools approach above.",
+   "read_only_args": [
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check"
+   ],
+   "edit_args": [],
+   "can_edit": false,
+   "timeout_s": 1800,
+   "roles": [
+    "System Architect",
+    "Software Engineering Code Reviewer",
+    "Adversarial Verifier",
+    "Hypothesis Refuter",
+    "MR Review Expert",
+    "Review Moderator"
+   ]
+  },
+  "gemini": {
+   "disabled": false,
+   "transport": "api",
+   "api_base": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+   "api_env": "GEMINI_API_KEY",
+   "model": "gemini-2.5-flash",
+   "cli_command": [
+    "/home/irina/.nvm/versions/node/v22.23.1/bin/gemini",
+    "-p",
+    "",
+    "-m",
+    "gemini-2.5-flash"
+   ],
+   "system_arg": [],
+   "stdin": true,
+   "read_only_args": [
+    "--approval-mode",
+    "yolo",
+    "--skip-trust"
+   ],
+   "edit_args": [],
+   "can_edit": false,
+   "timeout_s": 1800,
+   "roles": [
+    "System Architecture Reviewer",
+    "Technical Lead",
+    "Hypothesis Refuter",
+    "Adversarial Verifier",
+    "MR Review Expert",
+    "Review Moderator"
+   ],
+   "env": {
+    "GEMINI_CLI_TRUST_WORKSPACE": "true"
+   },
+   "_note": "2026-07-17: ENABLED via Google AI Studio API key in orchestration/gemini.env (sourced by ~/.bashrc). OAuth/GCA free tier is dead (UNSUPPORTED_CLIENT); the API key authenticates fine. Model pinned to gemini-2.5-flash because gemini-pro-latest returns 429 TerminalQuotaError on the free tier (pro quota ~0); flash has real free quota. If pro is ever needed, add billing to the key. 2026-08-21: transport switched cli -> api, because the CLI does not stay on the model it is given. An MR-review step died with \"429 ... generate_content_free_tier_requests, limit: 20, model: gemini-3.5-flash\" although the command pins -m gemini-2.5-flash: this key has effectively NO free allowance on 3.5-flash (a single one-word request to it 429s), while gemini-2.5-flash serves the same 33.6k-token review prompt over the API in ~22s. Checked the same day: gemini-3.1-pro-preview and gemini-pro-latest also 429 (free-tier pro quota is 0) and gemini-2.5-pro is 404 \"no longer available to new users\" — so 2.5-flash is not a compromise, it is the ceiling this key can actually reach. The API transport sends one request per step on the model we asked for, with no fallback of its own. Cost: no file access — gemini reviews what is in the prompt. `cli_command` below is kept so flipping transport back to \"cli\" restores the old behaviour."
+  },
+  "deepseek": {
+   "_comment": "Independent 4th-family arbiter. Two transports supported: api (key in api_env) or cli (for example a local model). 2026-08-21: GET /models on this key returns exactly deepseek-v4-flash, deepseek-v4-pro and deepseek-v4-flash-vision-exp — v4-pro below is the strongest model the account can reach, so there is no upgrade to make here.",
+   "transport": "api",
+   "api_base": "https://api.deepseek.com/chat/completions",
+   "api_env": "DEEPSEEK_API_KEY",
+   "model": "deepseek-v4-pro",
+   "cli_command": [
+    "ollama",
+    "run",
+    "deepseek-r1",
+    "{prompt}"
+   ],
+   "system_arg": [],
+   "read_only_args": [],
+   "edit_args": [],
+   "can_edit": false,
+   "roles": [
+    "Arbitration Reviewer",
+    "Investigation Arbiter",
+    "Adversarial Verifier",
+    "MR Review Expert",
+    "Review Moderator"
+   ]
   }
+ }
 }
