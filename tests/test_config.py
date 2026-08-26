@@ -127,3 +127,72 @@ class TestConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProjectLayerResolution(unittest.TestCase):
+    """The project layer is found, or the failure says which link broke.
+
+    Why this exists: the tool was moved one directory up, which turned the relative
+    `config/project.json` symlink into a dangling one. Resolution simply fell through
+    to the shipped template — `--mock` and this whole suite kept passing, and the only
+    hint was a guard complaint about repositories that were never the problem.
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+        from orchestrator import config as cfgmod
+        self.tmp = tempfile.mkdtemp()
+        self.cfgmod = cfgmod
+        self.env = os.environ.pop(cfgmod.PROJECT_ENV, None)
+
+    def tearDown(self):
+        import os
+        import shutil
+        if self.env is not None:
+            os.environ[self.cfgmod.PROJECT_ENV] = self.env
+        else:
+            os.environ.pop(self.cfgmod.PROJECT_ENV, None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_env_var_may_name_a_directory(self):
+        import os
+        from pathlib import Path
+        (Path(self.tmp) / self.cfgmod.PROJECT_FILE).write_text("{}", encoding="utf-8")
+        os.environ[self.cfgmod.PROJECT_ENV] = self.tmp
+        path, source = self.cfgmod.project_config_path()
+        self.assertEqual(path, (Path(self.tmp) / self.cfgmod.PROJECT_FILE).resolve())
+        self.assertIn(self.cfgmod.PROJECT_ENV, source)
+
+    def test_env_var_pointing_nowhere_is_an_error(self):
+        import os
+        os.environ[self.cfgmod.PROJECT_ENV] = self.tmp + "/nope.json"
+        with self.assertRaises(self.cfgmod.ConfigError) as e:
+            self.cfgmod.project_config_path()
+        self.assertIn("does not exist", str(e.exception))
+
+    def test_dangling_symlink_names_the_broken_link(self):
+        import os
+        from pathlib import Path
+        from unittest import mock
+        base = Path(self.tmp)
+        (base / "config").mkdir()
+        link = base / "config" / self.cfgmod.PROJECT_FILE
+        link.symlink_to("../../moved-away/project.json")
+        with mock.patch.object(self.cfgmod, "BASE", base):
+            with self.assertRaises(self.cfgmod.ConfigError) as e:
+                self.cfgmod.project_config_path()
+        msg = str(e.exception)
+        self.assertIn("dangling symlink", msg)
+        self.assertIn("moved-away/project.json", msg)   # says WHERE it pointed
+        self.assertIn(self.cfgmod.PROJECT_ENV, msg)     # and how to fix it
+
+    def test_no_layer_at_all_falls_back_to_the_template(self):
+        from pathlib import Path
+        from unittest import mock
+        base = Path(self.tmp)
+        (base / "config").mkdir()
+        with mock.patch.object(self.cfgmod, "BASE", base):
+            path, source = self.cfgmod.project_config_path()
+        self.assertEqual(path.name, self.cfgmod.PROJECT_EXAMPLE)
+        self.assertIn("TEMPLATE", source)

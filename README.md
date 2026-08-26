@@ -55,7 +55,7 @@ kept outside it, says what THIS project is:
     "analysis_repos": ["upstream-x"],        // read-only context, never modified
     "docs_architecture": "../docs/architecture"
   },
-  "guard":   { "enabled": true, "exclude_prefix": "tools/orchestration" },
+  "guard":   { "enabled": true, "exclude_prefix": "orchestration" },
   "context_file": "context.md",              // appended to EVERY role's prompt
   "role_context": {                          // ... and blocks only one role sees
     "Root Cause Investigator": "roles-context/root-cause-investigator.md"
@@ -109,7 +109,7 @@ To retarget the workspace, edit `paths.dev_repos` / `paths.analysis_repos` in
 ## Quick start
 
 ```bash
-cd tools/orchestration   # wherever the tool is checked out
+cd <tool>   # wherever this repo is checked out
 
 # 1) Check what's installed / configured (never installs anything)
 python3 orchestrate.py doctor

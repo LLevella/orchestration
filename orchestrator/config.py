@@ -136,6 +136,16 @@ def project_config_path() -> tuple[Path, str]:
             raise ConfigError(f"${PROJECT_ENV} points at {cand}, which does not exist")
         return cand.resolve(), f"${PROJECT_ENV}"
     local = BASE / "config" / PROJECT_FILE
+    # A dangling symlink is a MOVED tool or a moved project layer, not "no project layer".
+    # Falling through to the template would be quiet and wrong: mock runs and the suite keep
+    # passing, a real run then refuses to start with a guard complaint that points at the
+    # repositories instead of at the link that actually broke.
+    if local.is_symlink() and not local.exists():
+        raise ConfigError(
+            f"config/{PROJECT_FILE} is a dangling symlink -> {os.readlink(local)}\n"
+            "The tool or the project layer moved. Re-point it at the project layer "
+            "(an absolute link survives moving the tool), or set "
+            f"${PROJECT_ENV} to the project.json.")
     # resolve(): config/project.json is normally a SYMLINK to a project layer kept beside
     # the project, and that layer's paths are relative to where it really lives - resolving
     # the link here is what makes "repo_root": ".." mean the project, not the tool's config/.

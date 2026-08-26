@@ -7,10 +7,10 @@
     "analysis_repos": [],
     "docs_architecture": "docs/architecture"
   },
-  "_guard_comment": "exclude_prefix is applied within each watched repo, so the tool's own output never shows up as a change if the tool happens to live inside one. Defaults to the tool directory's name.",
+  "_guard_comment": "exclude_prefix is the tool's own path AS SEEN FROM INSIDE a watched repo, so its output never shows up as a change if the tool happens to live in one. Defaults to the tool directory's name; set it only if the tool sits inside a repo the guard watches.",
   "guard": {
     "enabled": true,
-    "exclude_prefix": "tools/orchestration"
+    "exclude_prefix": "orchestration"
   },
   "_context_comment": "The project's domain knowledge. context_file is appended to EVERY role's prompt; role_context adds a block only that role sees (the investigator's log-collection recipe is of no use to the PM gate, and every extra paragraph costs attention). Base roles stay identical across projects precisely because this is where the domain goes.",
   "context_file": null,

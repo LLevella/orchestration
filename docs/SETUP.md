@@ -43,14 +43,14 @@ a different project?** If not, it belongs in the project layer.
 ## Setting up a project
 
 1. **Clone the tool** somewhere shared, or once per machine:
-   `git clone <tool-repo> tools/orchestration`
+   `git clone <tool-repo> <tool>`   — anywhere; nothing here is project-specific.
 
 2. **Create the project layer** next to the workspace it describes — not inside the
    tool:
 
    ```bash
    mkdir -p <workspace>/orchestration-project/roles-context
-   cp tools/orchestration/config/project.example.json \
+   cp <tool>/config/project.example.json \
       <workspace>/orchestration-project/project.json
    ```
 
@@ -67,7 +67,7 @@ a different project?** If not, it belongs in the project layer.
        "runs_dir": "runs"                        // optional: keep run history here
                                                  // instead of inside the tool
      },
-     "guard": { "enabled": true, "exclude_prefix": "tools/orchestration" },
+     "guard": { "enabled": true, "exclude_prefix": "orchestration" },
      "context_file": "context.md",
      "role_context": {
        "Root Cause Investigator": "roles-context/root-cause-investigator.md",
@@ -79,15 +79,20 @@ a different project?** If not, it belongs in the project layer.
    Every repo in `dev_repos` + `analysis_repos` must be a real git worktree, or the
    guard fails closed and real runs refuse to start.
 
-4. **Point the tool at it** — either a symlink (survives in your shell history, works
-   for everyone using that checkout):
+4. **Point the tool at it** — either a symlink, which everyone using that checkout gets
+   for free:
 
    ```bash
-   ln -s ../../../<workspace>/orchestration-project/project.json \
-         tools/orchestration/config/project.json
+   ln -s /abs/path/to/<workspace>/orchestration-project/project.json \
+         <tool>/config/project.json
    ```
 
-   or an env var (better when one checkout serves several projects):
+   Make it **absolute**. A relative link is measured from `config/`, so moving the tool
+   one directory breaks it — the tool then refuses to start and names the broken link,
+   but you still have to go and fix it.
+
+   Or an env var, which survives moving either side and is the better choice when one
+   checkout serves several projects:
 
    ```bash
    export ORCH_PROJECT=<workspace>/orchestration-project/project.json   # file or dir
@@ -114,7 +119,9 @@ a different project?** If not, it belongs in the project layer.
    ```
 
    If it says `config/project.example.json (TEMPLATE)`, the tool did not find your
-   layer: `--mock` and the tests still work, real runs do not make sense.
+   layer: `--mock` and the tests still work, real runs do not make sense. If the link
+   exists but points nowhere, the tool says so by name instead of falling back —
+   that is the moved-tool case.
 
 ## Running
 
