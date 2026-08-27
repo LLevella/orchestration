@@ -247,6 +247,15 @@ class RunContext:
         # of steps that already completed in a prior interrupted run; the engine
         # replays these instead of re-invoking the agent. Empty = normal run.
         self.resume_cache = resume_cache or {}
+        # Set by Engine.call on every step: whether it was replayed from the journal,
+        # and whether that replay drained the cache (i.e. it is the LAST journaled
+        # step — the point where the resumed run actually stopped). The architecture
+        # loop needs both to place a --human-answer correctly: a deferral replayed
+        # from the middle of the history was already answered by an EARLIER resume,
+        # and consuming today's answer there leaves the real stop point with nothing
+        # to apply (Irina 2026-08-27).
+        self.last_call_replayed = False
+        self.last_call_final_replay = False
         # A human decision provided via `--human-answer` when resuming a run PAUSED
         # (AWAITING_HUMAN) because the arbiter could not decide. The architecture loop
         # feeds it back as a binding ruling. None on a normal run.

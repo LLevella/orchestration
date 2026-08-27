@@ -1,0 +1,30 @@
+{
+  "name": "human_at_budget",
+  "_comment": "Reproduces the 2026-08-26 dead end. The Developer never converges, so the Arbiter is called twice INSIDE the loop and both times decides on its own (REVIEWER_IS_RIGHT) - neither of those rulings may swallow a pending --human-answer. The dispute survives to the iteration budget (max_iterations=10). Without --human-answer the tail arbiter returns NEEDS_HUMAN_DECISION and the run PAUSES (AWAITING_HUMAN). With --human-answer the answer outranks the arbiter at that stop point, is applied as the binding ruling, and buys human_resume_iterations extra iterations - the Developer then returns FEASIBLE and the Tech Lead READY_FOR_HUMAN_REVIEW -> PASS. Before the fix this scenario paused in BOTH cases: the answer was cleared by the mid-loop arbiter and the boundary had no iteration left to apply it.",
+  "responses": {
+    "arch.dev_review": [
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 1).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 2).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 3).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 4).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 5).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 6).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 7).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 8).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 9).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- The decomposition boundary is still disputed (round 10).\n",
+      "## Implementation Feasibility Verdict\nFEASIBLE\n\n## Blocking Implementation Gaps\n- None; the human ruling settled the boundary.\n"
+    ],
+    "arch.arbiter": [
+      "### Arbitration Verdict\nREVIEWER_IS_RIGHT\n\n### Ruling\n- Tighten the disputed boundary; the Developer's objection stands (mid-loop 1).\n",
+      "### Arbitration Verdict\nREVIEWER_IS_RIGHT\n\n### Ruling\n- Same boundary, same objection; tighten it (mid-loop 2).\n",
+      "### Arbitration Verdict\nNEEDS_HUMAN_DECISION\n\n### Final Note for Human\n- Scope boundary tradeoff; a human must decide.\n"
+    ],
+    "arch.tech_lead": [
+      "## Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\n## Control Review\n- Sound and proportionate once the boundary is fixed.\n"
+    ]
+  },
+  "default": {
+    "arch.author": "# Architecture Proposal: Contested Decomposition (draft)\n\n## Proposed Design\nA decomposition whose card boundary the Developer keeps disputing.\n"
+  }
+}

@@ -81,6 +81,25 @@ class TestWorkflowsMock(unittest.TestCase):
         self.assertEqual(status, "PASS", out[-600:])
         self.assertEqual(rc, 0)
 
+    def test_arch_human_answer_survives_the_arbiters_own_rulings(self):
+        # Regression (2026-08-26): the dispute runs to the iteration budget and the arbiter
+        # decides on its own TWICE along the way. Those rulings must not swallow the pending
+        # human answer, and at the budget boundary the answer must outrank the arbiter and buy
+        # a bounded allowance — otherwise the answer has no iteration to be applied in and the
+        # run pauses again (which is exactly how resumes kept dying).
+        rc, status, out = _run("architecture", "human_at_budget",
+                               extra=["--human-answer", "Take the full decomposition as drafted."])
+        self.assertEqual(status, "PASS", out[-600:])
+        self.assertEqual(rc, 0)
+        self.assertIn("iteration 11", out, out[-600:])   # spent past max_iterations=10
+
+    def test_arch_human_at_budget_pauses_without_answer(self):
+        # The same dispute without an answer still stops at the cap: the extra allowance is
+        # bought by a human answer, it does not loosen the safety cap on its own.
+        rc, status, out = _run("architecture", "human_at_budget")
+        self.assertEqual(status, "AWAITING_HUMAN", out[-600:])
+        self.assertEqual(rc, 2)
+
     def test_arch_techlead_reject_loops_then_passes(self):
         # Developer FEASIBLE but Tech-Lead rejects once -> back to Architect<->Developer
         # (not straight to the arbiter) -> FEASIBLE again -> Tech-Lead READY -> PASS at iter 2.

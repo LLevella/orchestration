@@ -155,6 +155,10 @@ class Engine:
         # are already persisted in the working tree. The first un-journaled step
         # and everything after it runs live.
         cached = ctx.resume_lookup(step_id, phase, iteration)
+        ctx.last_call_replayed = cached is not None
+        # The replay that empties the cache is the last journaled step: everything
+        # after it runs live, so that is where the resumed run actually stopped.
+        ctx.last_call_final_replay = cached is not None and not ctx.resume_cache
         if cached is not None:
             resp = AgentResponse(cached["agent"], OK, text=cached["text"],
                                  role=role, duration=0.0)
@@ -448,6 +452,10 @@ class Engine:
             ruling; `techlead_reject_before_arbiter` cumulative non-approvals → Arbiter.
           • Arbiter issues a binding ruling → the loop reopens; if it cannot decide the run
             PAUSES (AWAITING_HUMAN) and resumes via `--human-answer`, fed back as a ruling.
+          • A `--human-answer` stays pending until it is really applied (a replayed arbiter that
+            decides on its own must not swallow it) and, at the budget boundary, outranks the
+            arbiter and buys `human_resume_iterations` extra iterations — once per run — so the
+            answer is built into the draft instead of the resume pausing again (Irina 2026-08-26).
         """
         wf = self.ctx.workflows["architecture"]
         author, tech_lead = wf["author"], wf["tech_lead"]
@@ -463,73 +471,99 @@ class Engine:
         nr_streak = 0                        # consecutive Developer NEEDS_REVISION
         tl_rejects = 0                       # cumulative Tech-Lead non-approvals
 
-        for i in range(1, maxit + 1):
-            # -- Architect writes (applying any pending Tech-Lead/Arbiter/Human ruling) --
-            ap = self._arch_author_prompt(task, ctx_docs, draft, last_review,
-                                          ruling=ruling, ruling_by=ruling_by)
-            aresp, _ = self.call("arch.author", author, ap, phase="architecture",
-                                 iteration=i, parse=False)
-            draft = aresp.text
-            self.ctx.tx.artifact(f"architecture-draft-{i:02d}.md", draft)
-            ruling = ruling_by = None
+        # The iteration budget is a live counter, not a fixed range: a human answer that
+        # arrives at the boundary buys a bounded extra allowance (see the tail below), so the
+        # ruling it carries can actually be applied instead of dying with the run.
+        budget, i, human_grant_used = maxit, 0, False
+        grant = wf.get("human_resume_iterations", 2)
+        while True:
+            while i < budget:
+                i += 1
+                # -- Architect writes (applying any pending Tech-Lead/Arbiter/Human ruling) --
+                ap = self._arch_author_prompt(task, ctx_docs, draft, last_review,
+                                              ruling=ruling, ruling_by=ruling_by)
+                aresp, _ = self.call("arch.author", author, ap, phase="architecture",
+                                     iteration=i, parse=False)
+                draft = aresp.text
+                self.ctx.tx.artifact(f"architecture-draft-{i:02d}.md", draft)
+                ruling = ruling_by = None
 
-            # -- Developer review: the primary implementability gate --
-            dvv, dvtext = self._arch_devreview(task, draft, "architecture", i)
-            last_review = dvtext
+                # -- Developer review: the primary implementability gate --
+                dvv, dvtext = self._arch_devreview(task, draft, "architecture", i)
+                last_review = dvtext
 
-            if dvv == "FEASIBLE":
-                nr_streak = 0
-                # -- Tech-Lead control review --
-                tl, tlv = self.call("arch.tech_lead", tech_lead,
-                                    self._arch_techlead_control_prompt(task, draft, dvtext),
-                                    phase="techlead", iteration=i)
-                if tlv == "READY_FOR_HUMAN_REVIEW":
-                    self.ctx.tx.artifact("architecture-final.md", draft)
-                    return self._finish(PASS, f"Developer FEASIBLE + Tech-Lead "
-                                        f"READY_FOR_HUMAN_REVIEW at iteration {i} → ready for human review.")
-                tl_rejects += 1
-                disagreements.append(f"### Tech-Lead review {i} (Tech Lead: {tlv})\n{tl.text}\n")
+                if dvv == "FEASIBLE":
+                    nr_streak = 0
+                    # -- Tech-Lead control review --
+                    tl, tlv = self.call("arch.tech_lead", tech_lead,
+                                        self._arch_techlead_control_prompt(task, draft, dvtext),
+                                        phase="techlead", iteration=i)
+                    if tlv == "READY_FOR_HUMAN_REVIEW":
+                        self.ctx.tx.artifact("architecture-final.md", draft)
+                        return self._finish(PASS, f"Developer FEASIBLE + Tech-Lead "
+                                            f"READY_FOR_HUMAN_REVIEW at iteration {i} → ready for human review.")
+                    tl_rejects += 1
+                    disagreements.append(f"### Tech-Lead review {i} (Tech Lead: {tlv})\n{tl.text}\n")
+                    self.ctx.tx.disagreements("\n".join(disagreements))
+                    if tlv == "ESCALATE_TO_HUMAN" or tl_rejects >= tl_esc:
+                        self.ctx.tx.md(f"\n> Tech-Lead did not approve (x{tl_rejects}/{tl_esc}"
+                                       f"{', ESCALATE' if tlv == 'ESCALATE_TO_HUMAN' else ''}) → Arbiter.\n")
+                        kind, payload, from_human = self._arch_arbiter_step(task, draft, tl.text,
+                                                                            disagreements, human_answer, i)
+                        if kind != "ruling":
+                            return payload
+                        ruling, ruling_by = payload, ("Human" if from_human else "Arbiter")
+                        if from_human:            # consumed only when actually applied
+                            human_answer = None
+                        nr_streak = tl_rejects = 0
+                        continue
+                    # Not approved, but below the arbiter threshold → reopen the Architect↔Developer loop.
+                    self.ctx.tx.md(f"\n> Tech-Lead not approved ({tlv}, x{tl_rejects}/{tl_esc}) "
+                                   f"→ back to Architect↔Developer.\n")
+                    ruling, ruling_by = tl.text, "Tech Lead"
+                    continue
+
+                # -- Developer NEEDS_REVISION / HUMAN_REQUIRED --
+                nr_streak += 1
+                disagreements.append(f"### Architecture iteration {i} (Developer: {dvv})\n{dvtext}\n")
                 self.ctx.tx.disagreements("\n".join(disagreements))
-                if tlv == "ESCALATE_TO_HUMAN" or tl_rejects >= tl_esc:
-                    self.ctx.tx.md(f"\n> Tech-Lead did not approve (x{tl_rejects}/{tl_esc}"
-                                   f"{', ESCALATE' if tlv == 'ESCALATE_TO_HUMAN' else ''}) → Arbiter.\n")
-                    kind, payload = self._arch_arbiter_step(task, draft, tl.text,
-                                                            disagreements, human_answer, i)
+                if dvv == HUMAN_REQUIRED or nr_streak >= dev_esc:
+                    self.ctx.tx.md(f"\n> Architect⇄Developer did not converge "
+                                   f"(NEEDS_REVISION x{nr_streak}/{dev_esc}) → Arbiter.\n")
+                    kind, payload, from_human = self._arch_arbiter_step(task, draft, dvtext,
+                                                                        disagreements, human_answer, i)
                     if kind != "ruling":
                         return payload
-                    ruling, ruling_by, human_answer = payload, "Arbiter", None
+                    ruling, ruling_by = payload, ("Human" if from_human else "Arbiter")
+                    if from_human:            # consumed only when actually applied
+                        human_answer = None
                     nr_streak = tl_rejects = 0
                     continue
-                # Not approved, but below the arbiter threshold → reopen the Architect↔Developer loop.
-                self.ctx.tx.md(f"\n> Tech-Lead not approved ({tlv}, x{tl_rejects}/{tl_esc}) "
-                               f"→ back to Architect↔Developer.\n")
-                ruling, ruling_by = tl.text, "Tech Lead"
-                continue
+                # else: the author revises per the developer review on the next iteration.
 
-            # -- Developer NEEDS_REVISION / HUMAN_REQUIRED --
-            nr_streak += 1
-            disagreements.append(f"### Architecture iteration {i} (Developer: {dvv})\n{dvtext}\n")
-            self.ctx.tx.disagreements("\n".join(disagreements))
-            if dvv == HUMAN_REQUIRED or nr_streak >= dev_esc:
-                self.ctx.tx.md(f"\n> Architect⇄Developer did not converge "
-                               f"(NEEDS_REVISION x{nr_streak}/{dev_esc}) → Arbiter.\n")
-                kind, payload = self._arch_arbiter_step(task, draft, dvtext,
-                                                        disagreements, human_answer, i)
-                if kind != "ruling":
-                    return payload
-                ruling, ruling_by, human_answer = payload, "Arbiter", None
-                nr_streak = tl_rejects = 0
+            # Budget spent without PASS. A human answer that is still pending HERE outranks
+            # anything the arbiter would add — this is the stop point, and the answer was given
+            # for exactly this dispute — so apply it as the binding ruling and grant a bounded
+            # allowance. Without the allowance the ruling has no iteration to be applied in and
+            # the resumed run pauses again on this very line (the failure this guards against).
+            # The arbiter is not called at all in that case: it is a live, expensive step whose
+            # output we would immediately override.
+            if human_answer and not human_grant_used:
+                ruling, ruling_by = (f"## Human decision (binding operational ruling)\n"
+                                     f"{human_answer}"), "Human"
+                human_answer, human_grant_used = None, True
+                budget += grant
+                self.ctx.tx.md(f"\n> Human ruling applied at the budget boundary → "
+                               f"{grant} extra iteration(s) granted (budget {budget}).\n")
                 continue
-            # else: the author revises per the developer review on the next iteration.
-
-        # Overall safety cap reached without PASS → one last arbiter, then the human.
-        kind, payload = self._arch_arbiter_step(task, draft, last_review or "",
-                                                disagreements, human_answer, maxit)
-        if kind != "ruling":
-            return payload
-        return self._pause_for_human(task, draft,
-                                     "Iteration budget exhausted after the arbiter's ruling; "
-                                     "a human should take it from here.", disagreements)
+            # No pending human answer → one last arbiter, then the human.
+            kind, payload, _ = self._arch_arbiter_step(
+                task, draft, last_review or "", disagreements, human_answer, i)
+            if kind != "ruling":
+                return payload
+            return self._pause_for_human(task, draft,
+                                         "Iteration budget exhausted after the arbiter's ruling; "
+                                         "a human should take it from here.", disagreements)
 
     def _arch_techlead_control_prompt(self, task, draft, dev_review):
         return (f"## Task\n{task}\n\n"
@@ -541,23 +575,39 @@ class Engine:
                 "with specific blockers, or ESCALATE_TO_HUMAN. Return your exact Tech Lead verdict format.")
 
     def _arch_arbiter_step(self, task, draft, last_review, disagreements, human_answer, i):
-        """One Arbiter adjudication (Irina 2026-08-13). Returns (kind, payload):
-          ("ruling", text)  -> a binding ruling (from the Arbiter, or from the human on resume);
-                               the caller reopens the Architect↔Developer loop with it.
-          ("human",  result)-> the Arbiter could not decide and no human answer is available: the
-                               run is PAUSED (AWAITING_HUMAN); return `result` as-is.
+        """One Arbiter adjudication (Irina 2026-08-13). Returns (kind, payload, from_human):
+          ("ruling", text, from_human) -> a binding ruling; `from_human` is True only when the
+                               ruling IS the resumed run's --human-answer. The caller must keep
+                               `human_answer` alive while it is False: a replayed arbiter that
+                               decides on its own must not swallow the human's answer, or the
+                               resume reaches the budget boundary with nothing left to apply.
+          ("human",  result, False) -> the Arbiter could not decide and no human answer is
+                               available: the run is PAUSED (AWAITING_HUMAN); return `result` as-is.
         FEASIBLE (the only PASS) is reached back in the main loop, never here."""
         arbiter = self.ctx.workflows["architecture"]["arbiter"]
         ares, averdict = self.call("arch.arbiter", arbiter,
                                    self._arbiter_prompt(task, draft, last_review, disagreements),
                                    phase="arbitration", iteration=i)
+        # A deferral replayed from the MIDDLE of the journal is history an earlier
+        # resume already answered; today's answer belongs to the point where the run
+        # being resumed stopped (the last journaled step) or to a live one. Applying
+        # it here would spend it on a decision that has already been made and leave
+        # the real stop point empty — the resume then replays everything and pauses
+        # again, which is precisely the dead end this guard exists to prevent.
+        answer_belongs_here = (not self.ctx.last_call_replayed
+                               or self.ctx.last_call_final_replay)
         if averdict not in ARB_STOP:
-            return ("ruling", ares.text)          # the Arbiter decided → reopen the loop
+            return ("ruling", ares.text, False)   # the Arbiter decided → reopen the loop
         # The Arbiter cannot decide on its own.
+        if human_answer and not answer_belongs_here:
+            # Keep the answer pending and let the replay continue past this settled
+            # dispute. The ruling text is inert here: every iteration it could reach
+            # is itself replayed from the journal, prompts included.
+            return ("ruling", "## Ruling replayed (already answered in an earlier resume)", False)
         if human_answer:
             self.ctx.tx.md("\n> Arbiter deferred to a human; applying the provided --human-answer.\n")
-            return ("ruling", f"## Human decision (binding operational ruling)\n{human_answer}")
-        return ("human", self._pause_for_human(task, draft, ares.text, disagreements))
+            return ("ruling", f"## Human decision (binding operational ruling)\n{human_answer}", True)
+        return ("human", self._pause_for_human(task, draft, ares.text, disagreements), False)
 
     def _pause_for_human(self, task, draft, arbiter_note, disagreements):
         """Pause the run for a human decision (the Arbiter could not resolve it alone). Persist the
@@ -568,7 +618,9 @@ class Engine:
              "The arbiter could not resolve the dispute on its own. Provide a decision and resume:\n\n"
              "    python3 orchestrate.py resume <run_id> --human-answer \"<your decision>\"\n\n"
              "(or `--human-answer @path/to/answer.md`). The answer is fed back into the loop as a "
-             "binding ruling.\n\n"
+             "binding ruling: it survives every arbiter step until it is really applied, and at the "
+             "iteration budget it outranks the arbiter and buys `human_resume_iterations` extra "
+             "author iterations (once per run) so the ruling is built into the draft.\n\n"
              f"## Arbiter's note\n{arbiter_note}\n\n"
              f"## Current draft under dispute\n{draft}\n\n"
              f"## Disagreement history\n{''.join(disagreements)}\n")

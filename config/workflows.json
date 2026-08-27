@@ -13,6 +13,8 @@
     "max_iterations": 10,
     "escalate_after_cycles": 5,
     "techlead_reject_before_arbiter": 5,
+    "human_resume_iterations": 2,
+    "_human_resume_note": "Irina 2026-08-26: a --human-answer that is still pending when the iteration budget runs out outranks the arbiter at that stop point and buys this many extra author iterations, ONCE per run, so the ruling is actually built into the draft. Without it a resumed run replays the whole history and pauses again with the answer unapplied. Mid-loop arbiter rulings no longer clear the pending answer. Fixture: architecture/human_at_budget.",
     "_flow_note": "Control flow (Irina 2026-08-13): Architect<->Developer loop; Developer FEASIBLE -> Tech-Lead review; Tech-Lead READY_FOR_HUMAN_REVIEW -> PASS (hand to human). escalate_after_cycles consecutive Developer NEEDS_REVISION -> Arbiter. Tech-Lead non-approval -> back into the Architect<->Developer loop; techlead_reject_before_arbiter cumulative non-approvals (or ESCALATE_TO_HUMAN) -> Arbiter. Arbiter ruling reopens the loop; if the Arbiter cannot decide the run PAUSES (AWAITING_HUMAN) and is resumed with `--human-answer`, fed back as a binding ruling. max_iterations bounds total author iterations.",
     "arbitration": {
       "max_iterations": 10,
