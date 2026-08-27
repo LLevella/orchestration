@@ -214,6 +214,7 @@
         "MAX_THINKING_TOKENS": "31999"
       },
       "roles": [
+        "System Architect",
         "Implementation Architect",
         "Advanced Developer Reviewer",
         "DevOps Reviewer"

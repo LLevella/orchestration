@@ -23,6 +23,7 @@
       "_author_swap_2026_07_10": "REVERTED 2026-07-10 (Irina: 'codex ожил, можно использовать') — codex back at arch-chain head (cross-vendor author restored). The temporary codex->claude swap covered the window when codex was quota-dying mid-arch (run 20260709T173818Z-architecture-5bdc died iter6). The claude-author finalization run 20260710T081637Z-architecture-6fb6 launched during the swap keeps its snapshotted roster (author=claude) and finishes on Opus; this revert affects only subsequent arch runs. Operational toggle (environment state, not project configuration).",
       "chain": [
         "codex",
+        "claude_author",
         "claude_reviewer",
         "gemini",
         "deepseek",
@@ -37,7 +38,8 @@
       ],
       "pinned": {
         "developer_verifier": "claude_reviewer"
-      }
+      },
+      "_author_fallback_2026_08_27": "Irina 2026-08-27: до этой правки роль System Architect была разрешена ТОЛЬКО codex и claude_haiku, поэтому смерть codex по квоте в прогоне 20260826T203138Z сдвинула авторство на самую слабую модель — она сократила принятый черновик, выкинув Boundary/Depends и обоснования оценок у всех карточек ($24.70 впустую). claude_author (Opus, read-only) получил роль System Architect и место в цепочке сразу за codex, так что запасной автор теперь Opus. На другие ячейки не влияет: claude_author не имеет ролей Technical Lead / Arbitration Reviewer."
     },
     "author": {
       "agent": "codex",
