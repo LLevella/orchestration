@@ -178,6 +178,15 @@ class TestWorkflowsMock(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("mr-review.md", out, out[-600:])
 
+    def test_a_run_records_the_code_it_ran_on(self):
+        # A run that cannot say which code produced it cannot be compared with any
+        # other run (2026-08-30). End-to-end: the version reaches the STATUS footer a
+        # human actually reads, through the real CLI. The CONTENT is not asserted here
+        # — a checkout with no git records a stated null, which is equally correct.
+        _rc, _status, out = _run("development", "pass")
+        self.assertIn("[STATUS FILE]", out)
+        self.assertIn("code: ", out.split("[STATUS FILE]", 1)[1])
+
     def test_every_shipped_scenario_terminates_cleanly(self):
         # Regression net: every fixture in every workflow must reach a terminal status
         # with a clean exit code (0 success / 2 human-required) — never hang or crash.

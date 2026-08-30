@@ -7,6 +7,7 @@ the current production-code diff to feed reviewers.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -201,6 +202,97 @@ def project_base(workflows_cfg) -> Path:
     return Path(d) if d else BASE
 
 
+# ---- run provenance: what code produced a run ------------------------------
+#
+# WHY (2026-08-30): run.json recorded what a run DID and never what it ran ON. The
+# tool changes between runs, so the run corpus became a mix of versions that cannot
+# be told apart - the measured baseline of this project (200 runs, taken at d08d1d4)
+# is comparable with any later measurement only if both name their code. Every part
+# below degrades to null WITH A STATED REASON rather than to a fabricated, empty or
+# plausible-looking value: an unknown version must never read as a known one, and
+# capturing a version must never be able to stop a run.
+
+
+def _git_read(cwd: Path, *args) -> tuple[bool, str]:
+    """Run ONE read-only git command in `cwd` -> (ok, stdout | failure reason).
+
+    Uses the same scrubbed environment as every other git call here (git_clean_env);
+    an absent git binary or a non-repository directory is a reason string, not a
+    raised exception."""
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), *args],
+                           capture_output=True, text=True, env=git_clean_env())
+    except OSError as e:
+        return False, f"git could not be run: {type(e).__name__}: {e}"
+    if r.returncode != 0:
+        lines = (r.stderr or r.stdout or "").strip().splitlines()
+        return False, (lines[0] if lines else f"git exited {r.returncode}")
+    return True, r.stdout.strip()
+
+
+def tool_version() -> dict:
+    """Version of the code that is EXECUTING: the directory orchestrate.py was loaded
+    from (BASE), which is usually NOT the repository being worked on.
+
+    Dirtiness is scoped to BASE's own subtree (`-- .`), so an unrelated change
+    elsewhere in a larger repository does not report the tool itself as modified.
+    """
+    v = {"path": str(BASE), "commit": None, "branch": None, "dirty": None,
+         "unavailable": None}
+    ok, head = _git_read(BASE, "rev-parse", "HEAD")
+    if not ok:
+        v["unavailable"] = ("the tool directory is not a git worktree, or git is "
+                            f"unavailable: {head}")
+        return v
+    v["commit"] = head
+    ok_branch, branch = _git_read(BASE, "rev-parse", "--abbrev-ref", "HEAD")
+    if ok_branch:
+        # A detached HEAD has no branch; say so rather than record the literal "HEAD".
+        v["branch"] = "(detached HEAD)" if branch == "HEAD" else branch
+    ok_dirty, porcelain = _git_read(BASE, "status", "--porcelain", "--", ".")
+    if ok_dirty:
+        v["dirty"] = bool(porcelain)
+    if not ok_branch or not ok_dirty:
+        missing, reason = (("branch", branch) if not ok_branch else ("dirtiness", porcelain))
+        v["unavailable"] = f"commit recorded; {missing} could not be read: {reason}"
+    return v
+
+
+def project_layer_version(workflows_cfg) -> dict:
+    """Identity of the per-project layer in force: its resolved path and a digest.
+
+    The digest covers project.json AND every context file the layer injects into
+    prompts, because those files ARE the project layer as a run experiences it: an
+    edited context.md changes every prompt in the run while project.json's own bytes
+    stay identical. Per-file digests are kept too, so a human can see WHICH file moved.
+    """
+    proj = workflows_cfg.get("_project") or {}
+    path = proj.get("_path")
+    base = project_base(workflows_cfg)
+    # Every ref is relative to the project layer's own directory (see project_base),
+    # and _path's parent IS that directory, so its basename is its relative name.
+    refs = [Path(path).name] if path else []
+    if proj.get("context_file"):
+        refs.append(proj["context_file"])
+    refs += [ref for ref in (proj.get("role_context") or {}).values() if ref]
+    files, unreadable = {}, []
+    for ref in refs:
+        try:
+            files[ref] = hashlib.sha256((base / ref).expanduser().read_bytes()).hexdigest()
+        except OSError as e:
+            files[ref] = None
+            unreadable.append(f"{ref} ({type(e).__name__})")
+    digest = hashlib.sha256(
+        "".join(f"{ref}\0{files[ref]}\n" for ref in sorted(files)).encode()).hexdigest()
+    note = None
+    if not path:
+        note = "no project layer is recorded in this configuration"
+    elif unreadable:
+        note = "digest omits unreadable file(s): " + ", ".join(unreadable)
+    return {"path": path, "source": proj.get("_source"), "digest": digest,
+            "files": files, "unavailable": note}
+
+
 def _read_context(base: Path, ref):
     """Read a project-context file named by the project layer, relative to it.
 
@@ -385,7 +477,10 @@ class RunContext:
         self.roles_dir = ((pbase / paths["roles_dir"]).resolve() if paths.get("roles_dir")
                           else (BASE / "roles").resolve())
         self.exclude = workflows_cfg.get("guard", {}).get("exclude_prefix", BASE.name)
+        # Every role prompt this run can use, read ONCE, now (see _snapshot_prompts).
         self._role_cache: dict[str, str] = {}
+        self._wrapper_cache: dict[str, str | None] = {}
+        self._snapshot_prompts()
         # Project knowledge injected into prompts: one block every role sees, plus
         # optional per-role blocks (the investigator's lab-log recipe is of no use to the
         # PM gate, and every extra paragraph costs attention).
@@ -398,6 +493,48 @@ class RunContext:
         self.repos = resolve_repos(workflows_cfg)
         self._baselines = {label: self._head(path) for label, path, _ in self.repos}
 
+    # ---- run provenance ------------------------------------------------
+    def _repo_versions(self) -> dict:
+        """Baseline commit + branch of each watched repo, as of run start.
+
+        The commit is the baseline capture_diff already froze in __init__ - reused, not
+        re-read, so what a run reports as its repo version cannot drift from the base
+        the reviewed diff was actually taken against.
+        """
+        out = {}
+        for label, path, kind in self.repos:
+            commit = self._baselines.get(label)
+            entry = {"path": path, "kind": kind, "commit": commit, "branch": None,
+                     "unavailable": None}
+            if commit is None:
+                entry["unavailable"] = ("no git HEAD at run start (not a git worktree, "
+                                        "an unborn branch, or git unavailable)")
+            else:
+                ok, branch = _git_read(Path(path), "rev-parse", "--abbrev-ref", "HEAD")
+                if ok:
+                    entry["branch"] = "(detached HEAD)" if branch == "HEAD" else branch
+                else:
+                    entry["unavailable"] = f"branch could not be read: {branch}"
+            out[label] = entry
+        return out
+
+    def versions(self) -> dict:
+        """What this run is running ON: the executing tool, the project layer in force,
+        and every watched repo's run-start baseline. Recorded into run.json at run
+        start so a number this run produces can be attributed to the code that produced
+        it - the tool changes between runs, and an un-versioned measurement cannot be
+        compared with any other.
+
+        Never raises: each part already degrades to a stated reason on its own, and the
+        catch-all below is there so no defect in provenance can cost a run its work.
+        """
+        try:
+            return {"tool": tool_version(),
+                    "project_layer": project_layer_version(self.workflows),
+                    "repos": self._repo_versions()}
+        except Exception as e:  # noqa: BLE001 - provenance must never stop a run
+            return {"unavailable": f"version capture failed: {type(e).__name__}: {e}"}
+
     # ---- resume -------------------------------------------------------
     def resume_lookup(self, step_id, phase, iteration):
         """Return the journaled result for this step if we are resuming and it
@@ -408,16 +545,64 @@ class RunContext:
         return self.resume_cache.pop((step_id, phase, iteration), None)
 
     # ---- role prompts -------------------------------------------------
-    def load_role(self, role: str, wrapper: str | None = None) -> str:
-        if role not in self._role_cache:
-            f = self.roles_dir / f"{role}.md"
-            self._role_cache[role] = f.read_text(encoding="utf-8") if f.exists() \
+    def _read_role(self, role: str) -> str:
+        f = self.roles_dir / f"{role}.md"
+        try:
+            return f.read_text(encoding="utf-8") if f.exists() \
                 else f"(ROLE FILE MISSING: {f})"
+        except OSError as e:
+            # Reported like a missing file - in the system prompt of the step that
+            # needed it - rather than raised: reading now happens at run start, and a
+            # read error there would kill the run before it has a STATUS to record.
+            return f"(ROLE FILE UNREADABLE: {f}: {e})"
+
+    def _read_wrapper(self, wrapper: str) -> str | None:
+        f = BASE / "prompts" / wrapper
+        try:
+            return f.read_text(encoding="utf-8") if f.exists() else None
+        except OSError:
+            return None
+
+    def _snapshot_prompts(self):
+        """Read every role file and prompt wrapper this run can use ONCE, at run start.
+
+        WHY (2026-08-30): load_role used to read a role file on FIRST use, so a role a
+        run had not reached yet - the Tech Lead gate runs last - was read from whatever
+        the file said by then. In a run whose developer edits this tool, an agent could
+        rewrite the prompt of the gate that judges it, mid-run. Nothing has done this;
+        nothing should be able to. agents.json / workflows.json are already read once
+        into memory, and the prompts they name now are too, so a file edited mid-run
+        cannot change any step of the run in flight.
+
+        Every role of every workflow is snapshotted, not just the current one: this is a
+        superset of what a run can reach, it costs one read per file, and it keeps the
+        freeze independent of which branch of a state machine a run happens to take.
+
+        A missing file is NOT reported here. It keeps the exact placeholder load_role
+        has always produced, so `(ROLE FILE MISSING: ...)` still surfaces in the step
+        that needed it and doctor's roles_present() still stats the disk.
+        """
+        for wf in WORKFLOWS:
+            for spec in (self.workflows.get(wf) or {}).values():
+                if not isinstance(spec, dict):
+                    continue
+                if spec.get("role") and spec["role"] not in self._role_cache:
+                    self._role_cache[spec["role"]] = self._read_role(spec["role"])
+                if spec.get("wrapper") and spec["wrapper"] not in self._wrapper_cache:
+                    self._wrapper_cache[spec["wrapper"]] = self._read_wrapper(spec["wrapper"])
+
+    def load_role(self, role: str, wrapper: str | None = None) -> str:
+        # Both reads come from the run-start snapshot. The lazy fill below only ever
+        # fires for a role or wrapper no workflow configures, which no step can reach.
+        if role not in self._role_cache:
+            self._role_cache[role] = self._read_role(role)
         text = self._role_cache[role]
         if wrapper:
-            wf = BASE / "prompts" / wrapper
-            if wf.exists():
-                text = text + "\n\n---\n\n" + wf.read_text(encoding="utf-8")
+            if wrapper not in self._wrapper_cache:
+                self._wrapper_cache[wrapper] = self._read_wrapper(wrapper)
+            wtext = self._wrapper_cache[wrapper]
+            if wtext is not None:
+                text = text + "\n\n---\n\n" + wtext
         for block, head in ((self.project_context, "Project context"),
                             (self.role_context.get(role, ""), f"Project context for {role}")):
             if block:

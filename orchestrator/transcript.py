@@ -42,6 +42,39 @@ def fmt_scope_cost(bucket) -> str:
     return f"${cost:.4f} reported"
 
 
+def fmt_version_line(versions) -> str:
+    """One line naming the code a run ran ON: the executing tool, the project layer in
+    force, and each watched repo's run-start baseline (see RunContext.versions).
+
+    A part that could not be read prints the reason the run recorded for it, never a
+    blank and never a plausible-looking substitute. Returns "" when a run recorded no
+    versions at all - every run written before this was captured - so those STATUS
+    files keep exactly the shape they have."""
+    if not versions:
+        return ""
+    if "tool" not in versions:
+        return ("code: version not recorded ("
+                + (versions.get("unavailable") or "no reason recorded") + ")")
+
+    def short(value, n=7):
+        return value[:n] if value else None
+
+    tool = versions.get("tool") or {}
+    if tool.get("commit"):
+        state = {True: "dirty", False: "clean"}.get(tool.get("dirty"), "dirtiness unknown")
+        t = (f"tool {short(tool['commit'])} "
+             f"({tool.get('branch') or 'unknown branch'}, {state})")
+    else:
+        t = f"tool unavailable ({tool.get('unavailable') or 'no reason recorded'})"
+    proj = versions.get("project_layer") or {}
+    p = f"project layer {short(proj.get('digest'), 12) or 'unavailable'}"
+    repos = ", ".join(
+        f"{label}@{short((v or {}).get('commit')) or 'no-HEAD'}"
+        f" ({(v or {}).get('branch') or '?'})"
+        for label, v in sorted((versions.get("repos") or {}).items()))
+    return f"code: {t} · {p} · repos: {repos or '(none watched)'}"
+
+
 class Transcript:
     def __init__(self, runs_dir, run_id, workflow, task, mock, scenario_name, config_snapshot):
         self.dir = Path(runs_dir) / run_id
@@ -360,7 +393,14 @@ class Transcript:
                       f"total {totals['total']} · provider-reported cost "
                       f"{fmt_scope_cost(totals)} · {totals['steps']} steps "
                       f"({totals['metered']} metered) · {totals['attempts']} attempts")
-        (self.dir / "STATUS").write_text(f"{status}\n{reason}\n\n{usage_line}\n", encoding="utf-8")
+        # ... and the code it ran on, for the same reason: a cost or a verdict that
+        # cannot be attributed to a version cannot be compared with another run's.
+        # Absent (a run recorded before this existed) -> the footer keeps its old shape.
+        version_line = fmt_version_line(self.meta.get("versions"))
+        body = f"{status}\n{reason}\n\n{usage_line}\n"
+        if version_line:
+            body += f"{version_line}\n"
+        (self.dir / "STATUS").write_text(body, encoding="utf-8")
         self.event(kind="status", status=status, reason=reason, usage_total=totals)
         self.md(f"\n---\n\n## FINAL STATUS: **{status}**\n\n{reason}\n")
         self._events.close()

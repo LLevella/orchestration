@@ -32,7 +32,8 @@ from orchestrator.config import (BASE, WORKFLOWS, ConfigError, RunContext,  # no
 from orchestrator.engine import HUMAN_REQUIRED, SUCCESS_STATUSES, Engine  # noqa: E402
 from orchestrator.guard import GitGuard  # noqa: E402
 from orchestrator.roster import Roster, availability_snapshot, format_preflight  # noqa: E402
-from orchestrator.transcript import Transcript, fmt_scope_cost  # noqa: E402
+from orchestrator.transcript import (Transcript, fmt_scope_cost,  # noqa: E402
+                                     fmt_version_line)
 
 # Run history defaults to the tool's own runs/ (gitignored). A project that would
 # rather keep its history with the project - the tool is shared, the runs are not -
@@ -392,6 +393,11 @@ def _run(workflow, args):
     _install_interrupt_handler(tx)
     ctx = RunContext(agents_cfg, workflows_cfg, adapters, guard, tx,
                      human_answer=_human_answer(args))
+    # Freeze WHAT THIS RUN RUNS ON before the first agent call: the executing tool, the
+    # project layer, and every watched repo's baseline. The tool changes between runs,
+    # so a number a run produces is comparable with another run's only if both say
+    # which code produced it.
+    tx.update_meta(versions=ctx.versions())
     engine = Engine(ctx, workflow)
 
     arch_ref = None
@@ -480,6 +486,50 @@ def _print_usage(run_dir):
     print(f"  full breakdown: {f}")
 
 
+def _print_versions(run_dir):
+    """Print what the run ran ON, from run.json.
+
+    The detail behind the STATUS one-liner: the tool directory as well as its commit
+    (they are different things — the tool need not be the repository under work), the
+    project layer's source and per-file digests (so a changed context.md is visible as
+    itself, not only as a moved combined digest), and each repo's baseline. A run
+    recorded before versions were captured says exactly that; it never gets a guess."""
+    f = run_dir / "run.json"
+    if not f.exists():
+        return
+    try:
+        meta = json.loads(f.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    v = meta.get("versions")
+    if not v:
+        print("\nCode version: NOT RECORDED (this run predates run-version capture)")
+        return
+    print("\nCode version:")
+    if "tool" not in v:          # capture itself failed; it recorded why
+        print(f"  unavailable  : {v.get('unavailable') or 'no reason recorded'}")
+        return
+    tool, proj = v.get("tool") or {}, v.get("project_layer") or {}
+    state = {True: "dirty", False: "clean"}.get(tool.get("dirty"), "dirtiness unknown")
+    print(f"  tool         : {tool.get('commit') or '(unavailable)'} "
+          f"({tool.get('branch') or 'unknown branch'}, {state})")
+    print(f"  tool dir     : {tool.get('path')}")
+    # Path AND source: `$ORCH_PROJECT` alone names the mechanism, not the file.
+    src = proj.get("source")
+    print(f"  project layer: {proj.get('path') or '(none)'}"
+          + (f"  (via {src})" if src else ""))
+    print(f"    digest     : {proj.get('digest')}")
+    for name, digest in sorted((proj.get("files") or {}).items()):
+        print(f"      {name}: {digest or '(unreadable)'}")
+    for label, r in sorted((v.get("repos") or {}).items()):
+        r = r or {}
+        print(f"  repo {label}: {r.get('commit') or '(no HEAD)'} "
+              f"({r.get('branch') or '?'}) [{r.get('kind')}] at run start")
+    for part in (tool, proj):
+        if part.get("unavailable"):
+            print(f"  note         : {part['unavailable']}")
+
+
 def cmd_show(args):
     _agents, workflows_cfg = load_config()
     runs = _runs_dir(workflows_cfg)
@@ -489,6 +539,7 @@ def cmd_show(args):
         sys.exit(f"error: run '{args.run_id}' not found. Available: {runs}")
     status = (d / "STATUS").read_text(encoding="utf-8") if (d / "STATUS").exists() else "(no STATUS yet)"
     print(f"== {args.run_id} ==\n{status}")
+    _print_versions(d)
     _print_usage(d)
     print(f"transcript : {d / 'transcript.md'}")
     print(f"events     : {d / 'events.jsonl'}")
@@ -580,6 +631,9 @@ def cmd_resume(args):
     ctx = RunContext(agents_cfg, workflows_cfg, adapters, guard, tx, resume_cache=cache,
                      human_answer=_human_answer(args),
                      resume_degradations=_resume_degradations(meta))
+    # A resume is a NEW run and may execute DIFFERENT code than the run it replays -
+    # which is precisely why it records its own version rather than inheriting one.
+    tx.update_meta(versions=ctx.versions())
     engine = Engine(ctx, workflow)
 
     arch_ref = None

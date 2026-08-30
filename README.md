@@ -289,6 +289,35 @@ gemini, deepseek) stays distinguishable from a measured `0.0`. Runs recorded
 before schema 2 are never rewritten; `show` labels them as legacy and says what
 their numbers omit.
 
+### What a run ran on
+
+At run start, before the first agent call, a run freezes its own provenance into
+`run.json.versions`, and it is surfaced in the `STATUS` footer and by
+`show <run-id>`:
+
+- **tool** — commit, branch and dirtiness of the directory `orchestrate.py` was
+  loaded from. That is the code that is *executing*, which is usually **not** the
+  repository being worked on; dirtiness is scoped to that directory's own subtree.
+- **project layer** — the resolved path in force plus a sha256 digest over
+  `project.json` **and** every context file it injects into prompts, so an edited
+  `context.md` is visible even though `project.json` never changed.
+- **repos** — each watched repo's baseline commit and branch, reusing the very
+  baselines `capture_diff` froze, so the recorded version cannot drift from the
+  base the reviewed diff was taken against.
+
+The tool changes between runs, so a cost, a duration or a verdict is comparable
+with another run's only if both name the code that produced them. Anything that
+cannot be read (a non-git tool directory, a missing `git`) is recorded as `null`
+**with the reason**, never as a fabricated or empty version, and version capture
+can never abort a run. Runs recorded before this existed have no `versions` field
+and still print — `show` says the version was not recorded rather than guessing.
+
+Role prompts are frozen the same way: every role file and prompt wrapper a run
+can use is read **once, at run start** (like `agents.json` / `workflows.json`),
+so a role file edited mid-run — including by the developer agent the run is
+reviewing — cannot change the rules a later step, such as the final Tech Lead
+gate, is judged by.
+
 ## Safety model
 
 - **Only Claude/Developer edits code.** Reviewers get `read_only_args`, never
