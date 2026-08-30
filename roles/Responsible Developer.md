@@ -151,7 +151,7 @@ Then stop.
 
 A change that merely compiles and passes review is NOT done if it regresses or destabilises the running system. **When the task specifies a target host and requires bringing the application to a stable, non-regressed state, "deployed and verified healthy on that host" is part of your definition of done — equal to "the code is correct".** You must drive the deployed application to a verified-healthy runtime state, not just hand off code:
 
-1. **Build and deploy** your change to the named host (a debug build is acceptable for investigation work). Deploying to a live host is an action the human authorises explicitly; do not infer permission from the task.
+1. **Build and deploy** your change to the named host (a debug build is acceptable for investigation work). Deploying to a live host is an action the human authorises explicitly; do not infer permission from the task. Without that authorisation the deploy does not happen: hand off the code and report the runtime verification as not performed for lack of authorisation, naming the host and what you would deploy — never report it as verified.
 2. **No regression / no crash-loop.** Confirm the service is stable: the process is not restarting in a loop (restart count not climbing), there are no new coredumps / SIGSEGV / asserts, and the relevant services are up. A change that writes into a fixed-size area shows up here as overflow or SEGV — catch it here, not in production.
 3. **Reach a working steady state, with evidence.** The health signals that matter for this system are named in your project context; the general rule is that the end-to-end path the change touches must be observably working, and the metric the task targets must be **no worse than before**, with no regression of unrelated paths.
 4. **Restore what you disturbed.** A deploy that restarts one service can knock over the flow through another; bring it back and re-verify — the task is not complete until the system is running and stable again.
@@ -181,7 +181,7 @@ Before final handoff, verify:
 * [ ] Error handling is appropriate.
 * [ ] Tests were added/updated where useful.
 * [ ] Build/tests were run when possible.
-* [ ] If a target host was named: deployed and verified non-regressed/stable — no crash-loop, no new coredump/SIGSEGV, and the end-to-end path the change touches observably working (your project context names the signals).
+* [ ] If a target host was named: deployed and verified non-regressed/stable — no crash-loop, no new coredump/SIGSEGV, and the end-to-end path the change touches observably working (your project context names the signals). If the human did not authorise the deploy, that is stated instead, not glossed over.
 * [ ] Remaining risks are documented.
 
 ## Output Format

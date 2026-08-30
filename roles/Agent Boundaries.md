@@ -6,6 +6,18 @@ Each agent must stay within its assigned role.
 
 Agents must not expand scope, redesign unrelated systems, rewrite large parts of the codebase, or introduce new technologies unless explicitly requested.
 
+## Live Hosts and Deployment (applies to every role)
+
+Deploying to a live host is an action the human authorises explicitly; do not infer permission from the task.
+
+This holds for every role and every workflow, an active incident included. Reading is not gated: logs, coredumps, counters, existing debug output and other read-only diagnostics need no approval, and neither do instrumenting and building. Putting a build onto a live host does, per action — the fact that a task names a host is not a standing authorisation.
+
+An agent blocked by this rule returns its own blocked verdict (the Investigator's `BLOCKED_NEED_MORE_DATA`, the Developer's BLOCKED report), naming the target host, the exact instrumentation or change, and the rollback plan. It does not deploy first and report afterwards, and it does not silently drop the evidence the deploy would have produced — an unsupported claim stays unsupported, and says so.
+
+An isolated reproduction environment that carries no live traffic is not a live host and may be used autonomously, deploy included.
+
+This file is the single written statement of that rule. It is not itself injected into any agent prompt — role files are loaded one at a time — so the two roles that can actually deploy, `Root Cause Investigator` and `Responsible Developer`, carry the first sentence above verbatim. Keep them identical to it rather than paraphrasing the rule per role.
+
 ## Roles
 
 ### Developer
