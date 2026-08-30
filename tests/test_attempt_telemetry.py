@@ -165,8 +165,16 @@ class TestAttemptRecording(unittest.TestCase):
 
 
 class TestRecoveryBoundary(unittest.TestCase):
-    """The engine applies the pre-P2 decision (`compat_*`), not the descriptive
-    P1 policy of the failure kind. P2 adds telemetry, not recovery."""
+    """Which failures recover, and how far the block reaches.
+
+    UPDATED 2026-08-30 (P1). P2 deliberately froze recovery to the pre-P2
+    legacy-marker decision (`compat_*`) so that classifying a failure could not, on
+    its own, start shifting the roster. P1 is the change set that was allowed to act
+    on the classification: the engine now reads `retry_same_agent` /
+    `roster_unavailable` and installs a SCOPED block. The legacy floor in failures.py
+    keeps the structured fields >= the compat ones, so everything that recovered
+    before still recovers — a timeout additionally does now, which is the point.
+    """
 
     def setUp(self):
         import orchestrator.engine as mod
@@ -190,41 +198,64 @@ class TestRecoveryBoundary(unittest.TestCase):
             self.assertEqual(len(_events(tx, "agent_attempt")), 1)
 
     def _shift(self, resp):
-        """Run `_shift_if_exhausted` against a minimal roster-managed cell and
-        report (shifted?, evicted agents)."""
-        class _Roster:
-            enabled = True
+        """Run `_block_and_shift` against a minimal roster-managed cell and report
+        (shifted?, blocked agents, the installed block). Uses the REAL roster: the
+        block's scope is now part of what this boundary is about."""
+        from orchestrator import failures
+        from orchestrator.roster import Roster
 
-            def __init__(self):
-                self.exhausted = set()
+        class _A:
+            def __init__(self, name):
+                self.cfg = {"roles": [ROLE], "provider": name, "availability_group": name}
 
-            def mark_exhausted(self, a):
-                self.exhausted.add(a)
+            def availability(self):
+                return True, "ok"
 
+        wf = {"roster": {"chain": ["claude", "codex"], "cells": ["cell"]},
+              "cell": {"agent": "claude", "role": ROLE}}
         with tempfile.TemporaryDirectory() as tmp:
             tx = _tx(tmp)
             self.addCleanup(_close, tx)
             ctx = _Ctx(tx, {})
-            ctx.workflows = {"investigation": {"cell": {"agent": "codex"}}}
+            ctx.workflows = {"investigation": wf}
             eng = Engine(ctx, "investigation")
-            eng.roster = _Roster()
-            eng._apply_roster_assignment = lambda: {}
-            return eng._shift_if_exhausted("s", "cell", "claude", resp), eng.roster.exhausted
+            eng.roster = Roster(wf, {"claude": _A("claude"), "codex": _A("codex")})
+            f = failures.failure_for_response(resp)
+            shifted = eng._block_and_shift("s", "cell", "claude", resp, f)
+            return shifted, eng.roster.exhausted, list(eng.roster.blocks)
 
-    def test_timeout_does_not_evict_the_agent(self):
+    def test_a_timeout_now_blocks_the_agent_briefly_and_shifts(self):
+        """P1: a wedged CLI is an AGENT-scoped, time-boxed block — another vendor does
+        not share it, and the agent comes back on a later logical call. P2 left this
+        deliberately inert; acting on it is exactly what P1 was authorised to add."""
         from orchestrator import failures
         f = failures.classify(stderr="TimeoutExpired: timed out after 900 seconds",
                               local_kind=failures.TIMEOUT)
-        self.assertTrue(f.roster_unavailable, "the kind still describes itself")
-        shifted, evicted = self._shift(AgentResponse("claude", ERROR, failure=f))
-        self.assertFalse(shifted)
-        self.assertEqual(evicted, set(), "P2 must not start shifting on timeouts")
+        self.assertTrue(f.roster_unavailable)
+        shifted, blocked, blocks = self._shift(AgentResponse("claude", ERROR, failure=f))
+        self.assertTrue(shifted)
+        self.assertEqual(blocked, {"claude"}, "the timeout blocks THAT agent only")
+        self.assertEqual(blocks[0].scope, "agent")
+        self.assertIsNotNone(blocks[0].retry_at, "a blip-class block must expire")
 
     def test_a_legacy_marker_still_evicts_and_shifts(self):
         resp = AgentResponse("claude", ERROR, error="You've reached your usage limit")
-        shifted, evicted = self._shift(resp)
+        shifted, blocked, blocks = self._shift(resp)
         self.assertTrue(shifted)
-        self.assertEqual(evicted, {"claude"})
+        self.assertEqual(blocked, {"claude"})
+        # a usage limit is an ACCOUNT matter, and this test double's account is itself
+        self.assertEqual(blocks[0].scope, "account")
+        self.assertIsNone(blocks[0].retry_at, "no reliable reset -> this process")
+
+    def test_an_invalid_request_installs_no_block_and_stays_fatal(self):
+        from orchestrator import failures
+        f = failures.classify(http_status=400,
+                              body={"error": {"type": "invalid_request_error",
+                                              "message": "bad model name"}})
+        shifted, blocked, blocks = self._shift(AgentResponse("claude", ERROR, failure=f))
+        self.assertFalse(shifted)
+        self.assertEqual(blocked, set())
+        self.assertEqual(blocks, [], "a malformed request fails for every agent")
 
 
 class TestFailedAttemptsAreRendered(unittest.TestCase):

@@ -215,9 +215,116 @@ def _read_context(base: Path, ref):
     return f.read_text(encoding="utf-8").strip()
 
 
+def _validate_agent_domains(agents):
+    """Every shipped agent must declare its failure domain.
+
+    `provider` / `availability_group` are what let the roster block the RIGHT set of
+    agents when one of them fails: without them a shared account limit is rediscovered
+    one alias at a time, which is how 11 of the 16 discarded corpus runs died. They are
+    required in the shipped config precisely so a newly added agent cannot silently
+    default to "a failure domain of its own" and re-create that walk. (A synthetic test
+    adapter that declares neither still defaults both to its own name — isolation is the
+    safe default for a double, but it is not acceptable as shipped configuration.)"""
+    for name, cfg in agents["agents"].items():
+        if name.startswith("_"):
+            continue
+        for field in ("provider", "availability_group"):
+            if not cfg.get(field):
+                raise ConfigError(
+                    f"agents.json: agent '{name}' is missing '{field}'. Every shipped "
+                    "agent must declare its failure domain so one account-level failure "
+                    "blocks every alias that shares it (see the roster's block registry).")
+
+
+def _validate_roster(wf, block, agents):
+    """Structured pins, edit-capable cells, the role allowlist behind both, and the
+    failure-domain separation that keeps a pin's two fallback lists honest."""
+    roster = block.get("roster") or {}
+    for cell, spec in block.items():
+        # every step block, not only the rostered cells: a writing cell that is bound
+        # statically must be edit-capable too.
+        if isinstance(spec, dict) and spec.get("requires_edit"):
+            agent = spec.get("agent")
+            if not (agents.get(agent) or {}).get("can_edit"):
+                raise ConfigError(
+                    f"workflows.json: {wf}.{cell} sets requires_edit but its agent "
+                    f"'{agent}' has can_edit=false. A writing cell may only be bound to "
+                    "an edit-capable agent; granting edit capability is a safety-model "
+                    "change, not a configuration one.")
+    for cell, pin in (roster.get("pinned") or {}).items():
+        if not isinstance(pin, dict):
+            if pin not in agents:                       # legacy string pin
+                raise ConfigError(f"workflows.json: {wf}.roster.pinned.{cell} references "
+                                  f"unknown agent '{pin}'")
+            continue
+        primary = pin.get("primary")
+        same = list(pin.get("agent_fallbacks") or [])
+        cross = list(pin.get("account_provider_fallbacks") or [])
+        if not primary:
+            raise ConfigError(f"workflows.json: {wf}.roster.pinned.{cell} has no 'primary'")
+        for label, names in (("agent_fallbacks", same),
+                             ("account_provider_fallbacks", cross)):
+            if len(set(names)) != len(names):
+                raise ConfigError(f"workflows.json: {wf}.roster.pinned.{cell}.{label} "
+                                  "repeats a candidate")
+            if primary in names:
+                raise ConfigError(f"workflows.json: {wf}.roster.pinned.{cell}.{label} "
+                                  f"repeats the primary '{primary}'")
+        both = sorted(set(same) & set(cross))
+        if both:
+            raise ConfigError(
+                f"workflows.json: {wf}.roster.pinned.{cell} lists {both} in BOTH "
+                "agent_fallbacks and account_provider_fallbacks. The two lists carry "
+                "different authority — one is taken on any agent-specific loss, the "
+                "other only on classified account/provider evidence and only while "
+                "recording a degradation — so a candidate may sit in exactly one.")
+        role = (block.get(cell) or {}).get("role") if isinstance(block.get(cell), dict) else None
+        for name in [primary] + same + cross:
+            if name not in agents:
+                raise ConfigError(f"workflows.json: {wf}.roster.pinned.{cell} references "
+                                  f"unknown agent '{name}' (known: {sorted(agents)})")
+            if role and role not in (agents[name].get("roles") or []):
+                raise ConfigError(
+                    f"workflows.json: {wf}.roster.pinned.{cell} names '{name}', which does "
+                    f"not declare the cell's role '{role}' in agents.json. A pin candidate "
+                    "that cannot hold the cell is a fallback that silently does not exist.")
+        # The two lists must MEAN what they are named, and naming is not evidence:
+        # `agent_fallbacks` is consulted on ANY agent-specific loss, without a
+        # classified account/provider trigger and without recording a degradation, so a
+        # different-provider agent hidden there would cross vendor families silently —
+        # exactly the assurance loss the structured pin exists to make explicit.
+        pcfg = agents[primary]
+        for name in same:
+            if agents[name].get("provider") != pcfg.get("provider"):
+                raise ConfigError(
+                    f"workflows.json: {wf}.roster.pinned.{cell}.agent_fallbacks names "
+                    f"'{name}' (provider '{agents[name].get('provider')}'), but the primary "
+                    f"'{primary}' is provider '{pcfg.get('provider')}'. This list covers an "
+                    "AGENT-specific loss and stays inside the primary's family; a "
+                    "different-provider candidate belongs in account_provider_fallbacks, "
+                    "which requires account/provider evidence and records what was lost.")
+        # And the converse: a cross-family fallback sharing the primary's account would
+        # be taken out by the very account-scoped block that unlocks the list.
+        for name in cross:
+            if agents[name].get("availability_group") == pcfg.get("availability_group"):
+                raise ConfigError(
+                    f"workflows.json: {wf}.roster.pinned.{cell}.account_provider_fallbacks "
+                    f"names '{name}', which shares the primary's availability_group "
+                    f"'{pcfg.get('availability_group')}'. That list is consulted only while "
+                    "an account- or provider-scoped block is active, and such a block "
+                    "covers every agent in the group: the fallback would be blocked by the "
+                    "same failure that unlocks it.")
+        if cross and not (pin.get("lost_assurance") or "").strip():
+            raise ConfigError(
+                f"workflows.json: {wf}.roster.pinned.{cell} allows a cross-family fallback "
+                "but states no 'lost_assurance'. Crossing vendor families changes what the "
+                "review is worth; the run must be able to say what was traded away.")
+
+
 def _validate(agents, workflows):
     if "agents" not in agents:
         raise ConfigError("agents.json: missing top-level 'agents' object")
+    _validate_agent_domains(agents)
     if "paths" not in workflows:
         src = (workflows.get("_project") or {}).get("_source", "the project layer")
         raise ConfigError(f"no 'paths' object: {src} must provide one "
@@ -233,11 +340,13 @@ def _validate(agents, workflows):
                 raise ConfigError(
                     f"workflows.json: {wf}.{key} references unknown agent "
                     f"'{spec['agent']}' (known: {sorted(known)})")
+        _validate_roster(wf, workflows[wf],
+                         {n: c for n, c in agents["agents"].items() if not n.startswith("_")})
 
 
 class RunContext:
     def __init__(self, agents_cfg, workflows_cfg, adapters, guard, tx, resume_cache=None,
-                 human_answer=None):
+                 human_answer=None, resume_degradations=None):
         self.agents_cfg = agents_cfg
         self.workflows = workflows_cfg
         self.adapters = adapters
@@ -247,6 +356,11 @@ class RunContext:
         # of steps that already completed in a prior interrupted run; the engine
         # replays these instead of re-invoking the agent. Empty = normal run.
         self.resume_cache = resume_cache or {}
+        # Cross-family pin fallbacks the run being resumed ALREADY used. The resumed run
+        # replays the steps those agents produced, so the assurance they cost is still
+        # gone: the engine seeds its ledger from this list instead of starting clean and
+        # letting the resume report a review that never happened. Empty = normal run.
+        self.resume_degradations = list(resume_degradations or [])
         # Set by Engine.call on every step: whether it was replayed from the journal,
         # and whether that replay drained the cache (i.e. it is the LAST journaled
         # step — the point where the resumed run actually stopped). The architecture

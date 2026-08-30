@@ -39,9 +39,19 @@
         "arbiter"
       ],
       "pinned": {
-        "developer_verifier": "claude_reviewer"
+        "developer_verifier": {
+          "primary": "claude_reviewer",
+          "agent_fallbacks": [
+            "claude"
+          ],
+          "account_provider_fallbacks": [
+            "deepseek"
+          ],
+          "lost_assurance": "Developer feasibility was not reviewed by the configured Claude developer. The DeepSeek API fallback cannot independently inspect the workspace and judges only the inlined task and proposal."
+        }
       },
-      "_author_fallback_2026_08_27": "Irina 2026-08-27: до этой правки роль System Architect была разрешена ТОЛЬКО codex и claude_haiku, поэтому смерть codex по квоте в прогоне 20260826T203138Z сдвинула авторство на самую слабую модель — она сократила принятый черновик, выкинув Boundary/Depends и обоснования оценок у всех карточек ($24.70 впустую). claude_author (Opus, read-only) получил роль System Architect и место в цепочке сразу за codex, так что запасной автор теперь Opus. На другие ячейки не влияет: claude_author не имеет ролей Technical Lead / Arbitration Reviewer."
+      "_author_fallback_2026_08_27": "Irina 2026-08-27: до этой правки роль System Architect была разрешена ТОЛЬКО codex и claude_haiku, поэтому смерть codex по квоте в прогоне 20260826T203138Z сдвинула авторство на самую слабую модель — она сократила принятый черновик, выкинув Boundary/Depends и обоснования оценок у всех карточек ($24.70 впустую). claude_author (Opus, read-only) получил роль System Architect и место в цепочке сразу за codex, так что запасной автор теперь Opus. На другие ячейки не влияет: claude_author не имеет ролей Technical Lead / Arbitration Reviewer.",
+      "_comment_2026_08_30": "2026-08-30 (P1, structured verifier pin): developer_verifier was a depth-ONE cell — claude_reviewer was the only agent in this chain whose allowlist carried 'Developer Verifier', so one recognised unavailability emptied the cell and the whole run was discarded mid-flight (16 corpus runs, all HUMAN_REQUIRED; one of them lost 13 completed steps and $15.19 on 2026-08-29). The pin is now explicit about its own fallbacks: `claude` for an AGENT-specific loss of claude_reviewer (still a real Claude developer, still same-family), and `deepseek` ONLY on classified ACCOUNT/PROVIDER evidence — in 11 of those 16 runs the block was the shared Anthropic account limit, which every claude_* alias hits identically, so no same-family depth could have helped. Crossing families costs assurance, so `lost_assurance` is mandatory and is recorded in run.json, the transcript and the STATUS summary every time it is used. `claude` is deliberately NOT added to the architecture chain: pin candidates are explicit references and need no chain membership, and the chain order is an approved contract (2026-06-15). Reservation is unchanged too — only `primary` is held back from the positional pass, so deepseek keeps filling the all-live arbiter cell. 2026-08-30 (same change set, after review): the split between the two lists is now ENFORCED by config validation, because naming a list is not evidence of what is in it. `agent_fallbacks` must share the primary's `provider` (it is taken on ANY agent-specific loss, with no account/provider trigger and no degradation record, so a different-provider candidate hidden there would cross vendor families silently); `account_provider_fallbacks` must NOT share the primary's `availability_group` (the account-scoped block that unlocks that list would otherwise cover the fallback too); and the two lists must be disjoint."
     },
     "author": {
       "agent": "codex",
@@ -84,11 +94,13 @@
         "architect",
         "tech_lead",
         "arbiter"
-      ]
+      ],
+      "_comment_2026_08_30": "2026-08-30 (P1, writer-cell edit requirement): `developer.requires_edit: true`. The developer cell is depth ONE by design — `claude` is the only agent with can_edit — and P1 does not invent a writer fallback, because granting edit capability to another agent is a safety-model change, not a resilience fix. `requires_edit` makes the constraint ENFORCED rather than implied: eligibility now needs can_edit as well as the role allowlist, so no shift-left and no cross-family fallback can ever put a read-only agent in a writing seat. Preflight reports the depth-one risk before the run starts, and losing the cell mid-run PAUSES the run (AWAITING_HUMAN, resumable) instead of discarding the completed iterations."
     },
     "developer": {
       "agent": "claude",
-      "role": "Responsible Developer"
+      "role": "Responsible Developer",
+      "requires_edit": true
     },
     "architect": {
       "agent": "codex",
@@ -127,11 +139,13 @@
         "refuter",
         "verifier",
         "arbiter"
-      ]
+      ],
+      "_comment_2026_08_30": "2026-08-30 (P1, writer-cell edit requirement): `investigator.requires_edit: true` — same rule as development.developer. The investigator is the only investigation role permitted to edit/build, `claude` is the only edit-capable agent, so the cell is depth one on purpose; eligibility now enforces can_edit, preflight exposes the risk, and runtime loss pauses resumably instead of aborting the run."
     },
     "investigator": {
       "agent": "claude",
-      "role": "Root Cause Investigator"
+      "role": "Root Cause Investigator",
+      "requires_edit": true
     },
     "refuter": {
       "agent": "codex",

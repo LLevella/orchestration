@@ -14,6 +14,7 @@ import time
 from . import failures
 from .adapters import OK, AgentResponse
 from .guard import GuardViolation
+from . import roster as roster_mod
 from .roster import Roster
 from .verdicts import ROLE_VERDICTS, extract_verdict
 
@@ -63,6 +64,37 @@ VERDICT_REPAIR_ATTEMPTS = 2
 
 class AgentError(Exception):
     pass
+
+
+class AvailabilityPause(AgentError):
+    """A roster cell has no live, capable agent left — the run PAUSES instead of dying.
+
+    Before P1 this was an ordinary `AgentError`: the chain ran out, `_finalize` raised,
+    and `Engine.run` finished HUMAN_REQUIRED, DISCARDING every completed iteration of
+    the run (16 corpus runs died that way; one lost 13 steps and $15.19 of finished
+    work on 2026-08-29). The work was never the problem — one agent was — so the run
+    now ends AWAITING_HUMAN with its journal intact and `resume` continues from the
+    step that could not be filled.
+
+    It SUBCLASSES `AgentError` on purpose: MR-review's two local `except AgentError`
+    handlers must keep catching an unavailable expert (a lost panel seat) and an
+    unavailable moderator (the unmerged-document fallback). Those stay local decisions
+    and never become a top-level availability pause.
+    """
+
+    def __init__(self, message, *, cell=None, role=None, agent=None, failure=None,
+                 candidates=()):
+        super().__init__(message)
+        self.cell = cell
+        self.role = role
+        self.agent = agent
+        self.failure = failure
+        self.candidates = list(candidates)
+
+    @property
+    def retry_at(self):
+        """Advisory only: an explicit resume always re-checks immediately."""
+        return getattr(self.failure, "retry_at", None)
 
 
 def _norm_hash(text: str) -> str:
@@ -128,6 +160,28 @@ class Engine:
         self.ctx = ctx
         self.workflow = workflow
         self.roster = None
+        # Cross-family pin fallbacks USED by this LOGICAL run: what was traded away and
+        # why. Journaled once each (run.json.degradations, a roster event, the
+        # transcript) and repeated in the final status, because a review done by a
+        # weaker-positioned agent must never look like the review that was configured.
+        #
+        # Seeded from the run being resumed. A resume replays the steps the degraded
+        # agent produced — that work is inherited, so its lost assurance is inherited
+        # with it. Starting the ledger empty would let the first live degradation
+        # overwrite `run.json.degradations` with a shorter list, and a resume that hits
+        # no degradation of its own would finish with a clean STATUS for a review the
+        # configured agent never gave.
+        self.degradations: list[dict] = [dict(d) for d in
+                                         (getattr(ctx, "resume_degradations", None) or [])]
+        self._degradation_keys: set = {self._degradation_key(d) for d in self.degradations}
+
+    @staticmethod
+    def _degradation_key(rec):
+        """Identity of a degradation across runs: which cell crossed families, to whom,
+        and on which blocked selector. Used to dedupe an inherited record against the
+        same fallback being re-selected live in the resumed run."""
+        return (rec.get("cell"), rec.get("selected"),
+                (rec.get("trigger") or {}).get("selector"))
 
     # ---- roster (availability-resolved role assignment) --------------
     def _apply_roster_assignment(self):
@@ -141,7 +195,46 @@ class Engine:
             if isinstance(blk, dict):
                 blk["_cell"] = cell
                 blk["agent"] = agent
+        self._record_degradations()
         return assignment
+
+    def _record_degradations(self):
+        """Journal every NEW cross-family pin fallback the last assignment produced."""
+        for rec in (getattr(self.roster, "degradations", None) or {}).values():
+            key = self._degradation_key(rec)
+            if key in self._degradation_keys:
+                continue
+            self._degradation_keys.add(key)
+            self.degradations.append(rec)
+            # nested, not spread: the record carries its own "kind"
+            self.ctx.tx.event(kind="roster_degradation", degradation=rec)
+            self.ctx.tx.update_meta(degradations=self.degradations)
+            self.ctx.tx.md(
+                f"\n> ⚠ **{rec['cell']}** crossed vendor families: "
+                f"`{rec['configured_primary']}` → `{rec['selected']}` because the "
+                f"{rec['trigger']['scope']} `{rec['trigger']['selector']}` is blocked "
+                f"({rec['trigger']['kind']}, source {rec['trigger']['source']}).\n>\n"
+                f"> Assurance lost: {rec['lost_assurance']}\n")
+
+    def _carry_forward_degradations(self):
+        """Write the INHERITED degradation ledger into this run's own history.
+
+        The resumed run is a new run directory with a new `run.json`; the evidence that
+        a cell crossed vendor families lives in the run being resumed. Re-journal it
+        here, at startup, so the record exists in this run even if nothing degrades
+        again — and so `run.json.degradations` stays transitive across a chain of
+        resumes."""
+        if not self.degradations:
+            return
+        self.ctx.tx.update_meta(degradations=self.degradations)
+        self.ctx.tx.event(kind="roster_degradation_inherited",
+                          degradations=self.degradations)
+        for rec in self.degradations:
+            self.ctx.tx.md(
+                f"\n> ⚠ inherited from the resumed run: **{rec.get('cell')}** was held "
+                f"by `{rec.get('selected')}` instead of the configured "
+                f"`{rec.get('configured_primary')}`. Those steps are replayed, so the "
+                f"assurance stays lost: {rec.get('lost_assurance', '')}\n")
 
     def _setup_roster(self):
         """Build the roster from the workflow's `roster` block and resolve the
@@ -149,15 +242,31 @@ class Engine:
         workflow declares no roster."""
         wf = self.ctx.workflows[self.workflow]
         self.roster = Roster(wf, self.ctx.adapters)
+        self._carry_forward_degradations()
         if not self.roster.enabled:
             return
+        # Preflight BEFORE the first provider call, from the roster's own frozen
+        # snapshot: which cells are filled, who else may hold them, and what the real
+        # allocator does if the assigned agent / its account / its provider goes away.
+        # The policy is ADVISORY on purpose and is stated in the output rather than
+        # implied — refusing a DEGRADED run would refuse every healthy `dev` run, since
+        # the writer cell is depth-one by design and P1 does not invent a writer.
+        report = self.roster.preflight()
         assignment = self._apply_roster_assignment()
-        lines = [f"  {c:22s} -> {assignment.get(c) or 'NONE (no live agent)'}"
-                 for c in self.roster.cells]
         self.ctx.tx.md("\n#### Roster — availability-resolved assignment\n"
-                       "```\n" + "\n".join(lines) + "\n```\n")
+                       "```\n" + roster_mod.format_preflight(self.workflow, report) + "\n```\n")
+        if report["status"] != roster_mod.READY:
+            self.ctx.tx.md(
+                f"\n> ⚠ roster preflight is **{report['status']}** — the run proceeds "
+                "knowingly. A cell that is reached with no live agent PAUSES the run "
+                "(AWAITING_HUMAN, resumable) before any provider call; completed steps "
+                "are kept and `resume` continues from there.\n")
         self.ctx.tx.event(kind="roster_assignment", workflow=self.workflow,
-                          assignment=assignment, exhausted=sorted(self.roster.exhausted))
+                          assignment=assignment, exhausted=sorted(self.roster.exhausted),
+                          preflight=report["status"], unassigned=report["unassigned"],
+                          fragile_cells=report["fragile_cells"],
+                          blocked_selectors=self.roster.blocked_selectors())
+        self.ctx.tx.update_meta(preflight=report)
 
     # ---- core step caller --------------------------------------------
     def call(self, step_id, spec, user_prompt, *, phase, iteration,
@@ -185,21 +294,50 @@ class Engine:
                         "(resumed — system prompt not re-sent)",
                         "(resumed — user prompt not re-sent)",
                         resp, verdict, iteration, phase)
+            # A6, across a resume: this cell HAS run, in the run being resumed, and the
+            # journal says by whom. Bind it before any live call, or the resumed run
+            # re-derives the assignment from scratch and a role that was displaced to a
+            # fallback silently goes back to its primary halfway through the logical
+            # run — the very mid-run change of hands `note_executed` exists to prevent.
+            # A binding whose agent is no longer eligible is simply ignored by assign().
+            if cell and self.roster is not None and self.roster.enabled:
+                self.roster.note_executed(cell, cached["agent"])
             return resp, verdict
 
-        # Shift-left loop: on an EXHAUSTED-class failure for a roster-managed cell,
-        # drop the agent, recompute the assignment, and retry with the next live
-        # agent in the chain. Terminates because each failure marks one more agent
-        # exhausted -> the chain eventually yields None -> a clear AgentError.
+        # ONE named refresh point per logical call (roster.py): due blocks expire, a
+        # fresh local-availability snapshot is taken, and the assignment is recomputed.
+        # Nothing is re-admitted WHILE the shift loop below is still searching, so
+        # eligibility can only shrink inside one call and the loop always terminates.
+        rostered = cell and self.roster is not None and self.roster.enabled
+        if self.roster is not None and self.roster.enabled:
+            for b in self.roster.begin_call():
+                ctx.tx.event(kind="roster_readmit", step=step_id, scope=b.scope,
+                             selector=b.selector, retry_at=b.retry_at,
+                             kind_of_block=b.kind, reason=b.reason)
+                ctx.tx.md(f"\n> ⤴ block on {b.scope} `{b.selector}` expired "
+                          f"({b.retry_at}) — its agents are eligible again.\n")
+            self._apply_roster_assignment()
+
+        # Shift-left loop: on an availability failure for a roster-managed cell, block
+        # the failure's whole DOMAIN (agent / account / provider), recompute the
+        # assignment, and retry with the next eligible agent. Terminates because each
+        # failure blocks one more selector and nothing is re-admitted mid-call -> the
+        # candidates eventually run out -> AvailabilityPause (a resumable pause), never
+        # a discarded run.
         retried_transient: set[str] = set()
         attempt_no = 0
         while True:
             agent = spec["agent"]
             if agent is None:
-                raise AgentError(
-                    f"no live agent for role '{role}'"
-                    + (f" (roster cell '{cell}')" if cell else "")
-                    + " — the fallback chain is exhausted.")
+                msg = (f"no live agent for role '{role}'"
+                       + (f" (roster cell '{cell}')" if cell else "")
+                       + " — every configured candidate is unavailable or blocked.")
+                # No invocation and no guard bracket exists yet, so the pause is raised
+                # directly: an unassigned OPENING cell costs zero provider calls.
+                if rostered:
+                    raise AvailabilityPause(msg, cell=cell, role=role,
+                                            candidates=self.roster.candidates(cell))
+                raise AgentError(msg)
             system = ctx.load_role(role, spec.get("wrapper"))
             before = ctx.guard.snapshot() if not allow_edit else None
             # Branches are captured for EVERY step, editable ones included: a
@@ -224,12 +362,14 @@ class Engine:
             # momentary failure does not drop a preferred agent (e.g. gemini tech_lead)
             # for the whole run. Persistent unavailability (quota/auth/billing/spending
             # cap) is NOT retried — it falls straight through to shift-left below.
-            # `compat_*`, not the descriptive POLICY row: P2 is telemetry, so the set
-            # of failures that retry or shift is exactly the pre-P2 one (a newly
-            # recognised `timeout`/`configuration` must not silently start recovering
-            # — that is P1's job and P1 is not in this change set).
+            # P1 reads the STRUCTURED policy (`retry_same_agent` / `roster_unavailable`)
+            # instead of P2's frozen `compat_*` seam — that seam existed only so
+            # telemetry would not change recovery before this change set landed. The
+            # legacy floor in failures.py keeps the structured fields >= the compat
+            # ones, so every failure that recovered before still recovers; a timeout or
+            # a missing binary now recovers too, which is the point of P1.
             if (failure is not None and agent not in retried_transient
-                    and failure.compat_retry_same_agent):
+                    and failure.retry_same_agent):
                 retried_transient.add(agent)
                 self.ctx.tx.event(kind="agent_retry", step=step_id, cell=cell, agent=agent,
                                   detail=failures.operator_reason(resp)[:200])
@@ -238,7 +378,8 @@ class Engine:
                                f"{TRANSIENT_RETRY_BACKOFF_S:g}s.\n")
                 time.sleep(TRANSIENT_RETRY_BACKOFF_S)
                 continue
-            if self._shift_if_exhausted(step_id, cell, agent, resp):
+            if failure is not None and self._block_and_shift(step_id, cell, agent,
+                                                             resp, failure):
                 continue  # retry with the shifted agent
             # Verdict repair: a successful step that must be parsed but carries no
             # known verdict token is nudged to re-emit it (bounded) BEFORE finalize,
@@ -250,9 +391,25 @@ class Engine:
                 resp = self._repair_verdict(step_id, agent, role, system,
                                             user_prompt, resp, allow_edit,
                                             phase=phase, iteration=iteration)
-            return self._finalize(step_id, agent, role, system, user_prompt,
-                                   resp, before, parse, iteration, phase, allow_edit,
-                                   branches_before)
+            try:
+                out = self._finalize(step_id, agent, role, system, user_prompt,
+                                     resp, before, parse, iteration, phase, allow_edit,
+                                     branches_before)
+            except AgentError as e:
+                # The failed attempt is journaled and _finalize has already run the
+                # branch and git-guard checks; ONLY NOW may an availability failure
+                # with no candidate left become a resumable pause. A GuardViolation is
+                # a different exception class and is never translated.
+                if failure is not None and failure.roster_unavailable and rostered:
+                    raise AvailabilityPause(str(e), cell=cell, role=role, agent=agent,
+                                            failure=failure,
+                                            candidates=self.roster.candidates(cell)) from e
+                raise
+            if rostered:
+                # This cell has now RUN. Bind it, so a block expiring later cannot
+                # hand the role to a re-admitted agent mid-run (roster.py, A6).
+                self.roster.note_executed(cell, agent)
+            return out
 
     def _record_attempt(self, step_id, *, phase, iteration, attempt, attempt_kind,
                         agent, role, resp):
@@ -272,25 +429,40 @@ class Engine:
                             usage=resp.usage, cost_usd=resp.cost_usd,
                             failure=failure.to_dict() if failure is not None else None)
 
-    def _shift_if_exhausted(self, step_id, cell, agent, resp) -> bool:
-        """If `resp` is an EXHAUSTED-class failure for a roster-managed cell, drop
-        the agent, recompute the assignment, and report whether a DIFFERENT live
-        agent is now in the cell (so the caller should retry)."""
+    def _block_and_shift(self, step_id, cell, agent, resp, failure) -> bool:
+        """Block the DOMAIN this failure really took out, recompute the assignment, and
+        report whether a DIFFERENT eligible agent is now in the cell (retry it).
+
+        The domain is the point. The old code evicted one agent NAME, so an
+        account-level Claude limit was rediscovered alias by alias — claude_reviewer,
+        then claude, then claude_sonnet, each paying for a call to hit the same
+        spending cap. 11 of the 16 runs discarded by an exhausted cell failed that way.
+        A scoped block takes the whole `availability_group` (or provider) out at once,
+        which is also what tells a structured pin it may cross vendor families.
+
+        Unknown and invalid-request failures install no block and stay fatal: a
+        malformed prompt fails for every agent, so walking the chain would only
+        multiply the damage."""
         if resp.status == OK or not cell or not (self.roster and self.roster.enabled):
             return False
-        # Same seam as before P2 (`is_unavailable`), now reading head+tail of BOTH
-        # streams instead of one of them. Deliberately NOT `roster_unavailable`,
-        # which is the P1 policy description: shifting on a timeout or a missing
-        # binary would be new recovery behaviour, not new telemetry.
-        if not failures.failure_for_response(resp).compat_roster_unavailable:
+        if not failure.roster_unavailable:
             return False
-        self.roster.mark_exhausted(agent)
+        block = self.roster.block_for_failure(agent, failure)
+        if block is None:
+            return False
         self._apply_roster_assignment()
         nxt = self.ctx.workflows[self.workflow].get(cell, {}).get("agent")
         self.ctx.tx.event(kind="roster_shift", step=step_id, cell=cell, exhausted=agent,
-                          next_agent=nxt, detail=failures.operator_reason(resp)[:200])
-        self.ctx.tx.md(f"\n> ⤵ `{agent}` exhausted on cell **{cell}** → shift-left to "
-                       f"`{nxt or 'NONE'}`, retrying.\n")
+                          next_agent=nxt, detail=failures.operator_reason(resp)[:200],
+                          scope=block.scope, selector=block.selector,
+                          retry_at=block.retry_at, failure_kind=block.kind,
+                          classification_source=block.source,
+                          blocked_selectors=self.roster.blocked_selectors())
+        span = (f"{block.scope} `{block.selector}`" if block.scope != "agent"
+                else f"`{agent}`")
+        until = f" until {block.retry_at}" if block.retry_at else " for this run"
+        self.ctx.tx.md(f"\n> ⤵ {span} blocked{until} ({block.kind}) on cell **{cell}** "
+                       f"→ shift-left to `{nxt or 'NONE'}`, retrying.\n")
         return bool(nxt and nxt != agent)
 
     def _outside_review_scope(self, violation) -> bool:
@@ -416,7 +588,57 @@ class Engine:
         return resp
 
     def _finish(self, status, reason):
+        if self.degradations:
+            # The final status is the one line an operator reads: a run whose verifier
+            # was not the configured one must say so there, not only in the transcript.
+            # Read with .get: records inherited from a resumed run come off disk, and a
+            # truncated one must not cost the run its STATUS line.
+            reason = reason.rstrip() + "\n\nDEGRADED — " + " ".join(
+                f"[{d.get('cell')}] {d.get('configured_primary')} → {d.get('selected')} "
+                f"({(d.get('trigger') or {}).get('kind')} block on "
+                f"{(d.get('trigger') or {}).get('scope')} "
+                f"'{(d.get('trigger') or {}).get('selector')}'). {d.get('lost_assurance', '')}"
+                for d in self.degradations)
         return self.ctx.tx.finish(status, reason)
+
+    def _pause_availability(self, e):
+        """End the run AWAITING_HUMAN, resumably, because a cell ran out of agents.
+
+        Nothing is discarded: every completed logical step is already journaled, so
+        `resume` replays them from the journal and re-runs only the step that could not
+        be filled. The pause metadata is additive (`run.json.pause`) and names the cell,
+        the provider's own reason, the blocked selector and the exact resume command."""
+        ctx = self.ctx
+        f = e.failure
+        selector = None
+        if f is not None and self.roster is not None:
+            selector = self.roster.selectors(e.agent).get(f.scope) if e.agent else None
+        pause = {
+            "kind": "availability", "cell": e.cell, "role": e.role, "agent": e.agent,
+            "reason": (f.reason if f is not None and f.reason else str(e)),
+            "failure": ({"kind": f.kind, "scope": f.scope, "selector": selector,
+                         "classification_source": f.classification_source}
+                        if f is not None else None),
+            "retry_at": e.retry_at,
+            "candidates": e.candidates,
+            "blocked_selectors": (self.roster.blocked_selectors()
+                                  if self.roster is not None else []),
+            "resume_command": f"python3 orchestrate.py resume {ctx.tx.run_id}",
+        }
+        ctx.tx.update_meta(pause=pause)
+        ctx.tx.event(kind="availability_pause", pause=pause)
+        ctx.tx.md(
+            f"\n> ⏸ cell **{e.cell}** has no live agent left → PAUSED "
+            f"(AWAITING_HUMAN). Reason: {pause['reason']}\n>\n"
+            f"> Configured candidates: {', '.join(e.candidates) or '(none)'}. "
+            f"Retry advice: {pause['retry_at'] or 'none supplied by the provider'}.\n>\n"
+            f"> Every completed step is journaled — resume with: "
+            f"`{pause['resume_command']}`\n")
+        return self._finish(
+            AWAITING_HUMAN,
+            f"PAUSED (availability): {e}. Completed steps are preserved in this run's "
+            f"journal; resume with `{pause['resume_command']}` once the agent is back "
+            f"(retry advice: {pause['retry_at'] or 'none supplied by the provider'}).")
 
     def _gate_enabled(self, cell) -> bool:
         """Is this cell wired in for this run? A cell with "enabled": false in
@@ -442,6 +664,10 @@ class Engine:
             if self.workflow == "mrreview":
                 return self._run_mrreview(task, mr)
             return self._run_development(task, arch_ref)
+        except AvailabilityPause as e:
+            # FIRST: a run that merely ran out of agents keeps its finished work and
+            # is resumable. Everything below it is still a terminal HUMAN_REQUIRED.
+            return self._pause_availability(e)
         except (AgentError, GuardViolation) as e:
             return self._finish(HUMAN_REQUIRED, f"Aborted: {e}")
         except Exception as e:  # noqa: BLE001 - never leave a run without a STATUS

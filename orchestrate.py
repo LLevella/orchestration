@@ -31,6 +31,7 @@ from orchestrator.config import (BASE, WORKFLOWS, ConfigError, RunContext,  # no
                                  load_config, project_base, resolve_repos)
 from orchestrator.engine import HUMAN_REQUIRED, SUCCESS_STATUSES, Engine  # noqa: E402
 from orchestrator.guard import GitGuard  # noqa: E402
+from orchestrator.roster import Roster, availability_snapshot, format_preflight  # noqa: E402
 from orchestrator.transcript import Transcript, fmt_scope_cost  # noqa: E402
 
 # Run history defaults to the tool's own runs/ (gitignored). A project that would
@@ -277,6 +278,8 @@ def cmd_doctor(args):
     for role, present in sorted(ctx.roles_present().items()):
         print(f"  {'OK ' if present else 'MISSING'}  {role}")
 
+    _print_preflight(workflows_cfg, adapters)
+
     print("\nMock scenarios:")
     for wf in WORKFLOWS:
         d = BASE / "fixtures" / wf
@@ -286,6 +289,29 @@ def cmd_doctor(args):
     print("\nReady for --mock runs: YES (no credentials required).")
     print("Ready for real runs  :",
           "NO - install/configure the MISSING agents above." if any_missing else "YES.")
+
+
+def _print_preflight(workflows_cfg, adapters):
+    """Roster readiness for every workflow, from ONE frozen availability snapshot.
+
+    Same `Roster.preflight()` object and same renderer the engine writes into a run's
+    transcript, so `doctor` and a real run cannot disagree about who would hold which
+    cell. All configured cells are treated as reachable rather than guessing which
+    state-machine branches a run will take, and no provider is contacted: this is local
+    readiness, never a claim about remote account health."""
+    snapshot = availability_snapshot(adapters)
+    print("\nRoster preflight (per workflow; ✎ = the cell must be able to edit code):")
+    for wf in WORKFLOWS:
+        r = Roster(workflows_cfg.get(wf, {}), adapters, snapshot=snapshot)
+        if not r.enabled:
+            print(f"  {wf}: no roster block (static per-cell agents)")
+            continue
+        print("\n".join("  " + line for line in
+                        format_preflight(wf, r.preflight()).splitlines()))
+    print("\n  READY = every cell survives losing its agent, its account and its provider."
+          "\n  DEGRADED / UNASSIGNED do NOT block a run: it starts, and a cell that is "
+          "reached with\n  no live agent pauses it (AWAITING_HUMAN, resumable) instead of "
+          "discarding finished work.")
 
 
 _MOCK_DIFF = ("--- a/mock/service.py\n+++ b/mock/service.py\n@@ -1,3 +1,4 @@\n"
@@ -503,6 +529,19 @@ def _load_resume_cache(src: Path) -> dict:
     return cache
 
 
+def _resume_degradations(meta) -> list:
+    """Cross-family pin fallbacks the run being resumed already paid for.
+
+    Carried forward rather than recomputed: the resume REPLAYS the steps those agents
+    produced, so the assurance they cost is still gone and the new run's STATUS has to
+    keep saying so. `run.json.degradations` is transitive — a resumed run re-journals
+    what it inherited — so resuming a resume keeps the whole ledger. Malformed rows are
+    dropped: a hand-edited run.json must not be able to break the final status."""
+    return [d for d in (meta.get("degradations") or [])
+            if isinstance(d, dict) and d.get("cell") and d.get("selected")
+            and isinstance(d.get("trigger"), dict)]
+
+
 def cmd_resume(args):
     """Resume an interrupted real run: replay its journaled steps instantly, then
     run the first un-journaled step and everything after it live. The working tree
@@ -517,6 +556,14 @@ def cmd_resume(args):
     if meta.get("mock"):
         sys.exit("error: refusing to resume a mock run (re-run it with --mock instead).")
     workflow, task = meta["workflow"], meta["task"]
+    if (meta.get("pause") or {}).get("kind") == "availability" and _human_answer(args):
+        # --human-answer is a binding RULING for an arbiter that could not decide. An
+        # availability pause asked no question: nothing consumes the answer, and the
+        # run would silently resume without it. Say so instead.
+        sys.exit(f"error: run '{args.run_id}' paused because a roster cell had no live "
+                 f"agent ({(meta['pause'].get('cell') or '?')}), not because a human "
+                 "decision was needed. Resume it without --human-answer once the agent "
+                 "is back:\n  python3 orchestrate.py resume " + args.run_id)
 
     guard, _repos, repo_root = _build_guard(workflows_cfg)
     if not guard.active and not args.allow_unguarded:
@@ -531,7 +578,8 @@ def cmd_resume(args):
     tx.update_meta(resumed_from=args.run_id, resumed_steps=len(cache))
     _install_interrupt_handler(tx)
     ctx = RunContext(agents_cfg, workflows_cfg, adapters, guard, tx, resume_cache=cache,
-                     human_answer=_human_answer(args))
+                     human_answer=_human_answer(args),
+                     resume_degradations=_resume_degradations(meta))
     engine = Engine(ctx, workflow)
 
     arch_ref = None

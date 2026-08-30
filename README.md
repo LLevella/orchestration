@@ -331,12 +331,46 @@ their numbers omit.
 - **A transport that returns nothing is a failure.** A CLI that exits 0 having
   printed nothing produced no answer, so it is recorded as one rather than
   passed on as an empty reply.
-- **Richer failure telemetry changed no recovery path.** A failure is now
-  *described* precisely (kind, scope, HTTP status, provider code, reset time),
-  but which failures retry the same agent or shift the roster is still decided
-  by the pre-existing markers — `FailureInfo.compat_*` is what the engine acts
-  on, and it is the unchanged legacy verdict. Acting on the richer
-  classification is failure-domain-aware recovery: a separate change.
+- **Recovery is failure-domain-aware.** A failure is described precisely (kind,
+  scope, HTTP status, provider code, reset time) and the engine now ACTS on that
+  description: it blocks the domain the failure really took out — the agent, the
+  `availability_group` that shares its credentials and caps, or the whole
+  provider — instead of one agent name at a time. An account-level Claude limit
+  therefore takes every `claude_*` alias out at once, rather than being
+  rediscovered alias by alias at the price of a call each. Unknown and
+  invalid-request failures still install no block and stay fatal: a malformed
+  prompt fails for every agent.
+- **Running out of agents PAUSES a run, it never discards one.** When a cell has
+  no live, capable agent left, the run ends **AWAITING_HUMAN** (exit 2) with its
+  journal intact and the exact `resume` command, instead of aborting and throwing
+  away every completed iteration. The guard and branch checks still run first,
+  and a `GuardViolation` is never turned into a pause. The `resume` picks the
+  logical run up where it stopped: each replayed step re-binds its cell to the
+  agent that actually ran it, and any assurance already traded away is carried
+  forward, so a role cannot change hands and a degradation cannot vanish just
+  because the run was continued in a second process.
+- **Time-boxed blocks expire; already-executed cells do not move.** A 503 or a
+  cap with a reliable reset re-admits its agents at the next logical step (and
+  they get a fresh once-per-step retry allowance); a cap whose reset message
+  carries no date installs no deadline and comes back only via an explicit
+  `resume`. A cell that has already run keeps the agent that ran it, so a
+  re-admission never makes a role change hands mid-run.
+- **Crossing vendor families is explicit, evidenced, and recorded.** Exactly one
+  pin (the architecture Developer-Verifier) may fall back to another family, only
+  on a classified account/provider block, never on a locally missing CLI — and
+  every use records what assurance was lost, in `run.json`, the transcript and
+  the final STATUS. A read-only agent can never land in a writing cell: those
+  cells declare `requires_edit`, which is enforced on top of the role allowlist.
+- **Readiness is checked before the first provider call.** `doctor` and every run
+  start share one `Roster.preflight()` over a single frozen availability
+  snapshot: per cell it reports who holds it, who else may, and what the real
+  allocator does if that agent / its account / its provider disappears. A
+  cross-family fallback is counted apart from the live candidates, because it is
+  not selectable until account/provider evidence unlocks it — a cell never reads
+  as "one live candidate" while it is in fact empty. The
+  policy is advisory and stated, not implied — READY, DEGRADED and UNASSIGNED all
+  proceed (the writing cells are depth-one by design), and a cell that is
+  actually reached empty pauses the run before any provider is called.
 - **Always-finalized history:** even an unexpected error writes a STATUS and
   records the traceback to `events.jsonl`.
 - **Mock mode** runs the full state machine with zero credentials.
