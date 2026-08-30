@@ -33,6 +33,7 @@ class _Ctx:
         self.human_answer = human_answer
         self.workflows = {"architecture": {"arbiter": ARBITER}}
         self.tx = _Tx()
+        self.live_calls = 0
         self.last_call_replayed = False
         self.last_call_final_replay = False
 

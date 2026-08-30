@@ -52,6 +52,7 @@ class _Ctx:
         self.guard = _Guard()
         self.resume_cache = {}
         self.workflows = {"investigation": {}}
+        self.live_calls = 0
         self.last_call_replayed = False
         self.last_call_final_replay = False
 

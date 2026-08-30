@@ -304,6 +304,12 @@ class Engine:
                 self.roster.note_executed(cell, cached["agent"])
             return resp, verdict
 
+        # Past the replay branch this step is NOT journaled history: it runs live. Count
+        # it here, at the one point every live step passes through, so an iteration loop
+        # can charge its budget for any iteration that did real work — whether that work
+        # was its opening step or a later one (Irina 2026-08-30).
+        ctx.live_calls += 1
+
         # ONE named refresh point per logical call (roster.py): due blocks expire, a
         # fresh local-availability snapshot is taken, and the assignment is recomputed.
         # Nothing is re-admitted WHILE the shift loop below is still searching, so
@@ -753,6 +759,10 @@ class Engine:
             decides on its own must not swallow it) and, at the budget boundary, outranks the
             arbiter and buys `human_resume_iterations` extra iterations — once per run — so the
             answer is built into the draft instead of the resume pausing again (Irina 2026-08-26).
+          • The iteration budget charges an iteration once if ANY of its steps ran live, and
+            nothing for one replayed end to end: journaled history sends no prompt, so it can
+            neither spend a ruling nor exhaust the budget before the ruling reaches a real
+            iteration (Irina 2026-08-30).
         """
         wf = self.ctx.workflows["architecture"]
         author, tech_lead = wf["author"], wf["tech_lead"]
@@ -768,13 +778,42 @@ class Engine:
         nr_streak = 0                        # consecutive Developer NEEDS_REVISION
         tl_rejects = 0                       # cumulative Tech-Lead non-approvals
 
-        # The iteration budget is a live counter, not a fixed range: a human answer that
-        # arrives at the boundary buys a bounded extra allowance (see the tail below), so the
-        # ruling it carries can actually be applied instead of dying with the run.
-        budget, i, human_grant_used = maxit, 0, False
+        # WHAT THE BUDGET COUNTS: iterations in which real work happened. `i` numbers every
+        # iteration (it is the journal key, so a replay has to keep it in step with the run
+        # being resumed), while `spent` charges ONE unit for each iteration in which ANY step
+        # — author, developer review, Tech Lead or arbiter — actually invoked an agent.
+        # Replaying journaled history sends no prompt and is free; an iteration that is only
+        # part-replayed (the journal ends inside it) did live work and is charged in full.
+        # A run still cannot loop forever: a journal is finite, so all but finitely many
+        # iterations are live, and every live one is charged. `budget` itself grows exactly
+        # once, by the human grant in the tail below, so a ruling that arrives at the
+        # boundary has a LIVE iteration to be applied in.
+        # Charging replay was the defect (Irina 2026-08-30): a second resume reached the
+        # boundary on replayed history alone, spent its one human grant on iterations that
+        # were themselves replayed, and paused again with the ruling undelivered — the run
+        # could never be finished (20260830T014616Z-architecture-fe5e: 28 steps replayed,
+        # $0.00 spent). Because a resume re-journals what it replays, the journal is always a
+        # prefix of the run: once `budget` live iterations have been charged the budget is
+        # exhausted, so the iterations the grant buys below are ones that really run.
+        budget, spent, i, human_grant_used = maxit, 0, 0, False
         grant = wf.get("human_resume_iterations", 2)
+        # High-water mark of live calls already charged to `spent`. Comparing it with
+        # `ctx.live_calls` is what makes the charge per-ITERATION and step-agnostic: it
+        # asks "did anything in the iteration just finished run live?", not "did the
+        # author run live?" — an iteration whose author replayed but whose reviewer or
+        # arbiter went live is real work and pays for itself.
+        charged_live = self.ctx.live_calls
         while True:
-            while i < budget:
+            while True:
+                # Charge the iteration that has just finished. Every exit from the body
+                # below comes back through here (or returns outright), so this is the one
+                # accounting point for the whole loop, and it runs before the budget is
+                # re-tested.
+                if self.ctx.live_calls > charged_live:
+                    spent += 1
+                    charged_live = self.ctx.live_calls
+                if spent >= budget:
+                    break
                 i += 1
                 # -- Architect writes (applying any pending Tech-Lead/Arbiter/Human ruling) --
                 ap = self._arch_author_prompt(task, ctx_docs, draft, last_review,
@@ -842,7 +881,8 @@ class Engine:
             # anything the arbiter would add — this is the stop point, and the answer was given
             # for exactly this dispute — so apply it as the binding ruling and grant a bounded
             # allowance. Without the allowance the ruling has no iteration to be applied in and
-            # the resumed run pauses again on this very line (the failure this guards against).
+            # the resumed run pauses again on this very line (the failure this guards against);
+            # the budget above guarantees the allowance buys iterations that really run.
             # The arbiter is not called at all in that case: it is a live, expensive step whose
             # output we would immediately override.
             if human_answer and not human_grant_used:

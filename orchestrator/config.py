@@ -462,6 +462,11 @@ class RunContext:
         # to apply (Irina 2026-08-27).
         self.last_call_replayed = False
         self.last_call_final_replay = False
+        # Monotonic count of steps this run really INVOKED an agent for (a replay does
+        # not increment it). An iteration loop charges its budget by watching this grow,
+        # so an iteration is paid for when ANY of its steps ran live — not merely when
+        # its first one did (Irina 2026-08-30).
+        self.live_calls = 0
         # A human decision provided via `--human-answer` when resuming a run PAUSED
         # (AWAITING_HUMAN) because the arbiter could not decide. The architecture loop
         # feeds it back as a binding ruling. None on a normal run.

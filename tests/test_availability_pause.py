@@ -86,6 +86,7 @@ class _Ctx:
         self.resume_cache = dict(resume_cache or {})
         self.resume_degradations = list(resume_degradations)
         self.workflows = workflows
+        self.live_calls = 0
         self.last_call_replayed = False
         self.last_call_final_replay = False
         self.human_answer = None
