@@ -30,14 +30,15 @@ Two goals, **no quality loss**:
 | Arbiter | hypothesis + disagreement history |
 
 ## Run control — token accounting
-- Each step captures `usage` (normalized `{input, output, total}`) + `cost_usd`:
-  - **claude** — `--output-format json` (auto-injected by the adapter); reads `.usage` + `.total_cost_usd`, parses `.result` back out as the text so verdict parsing is unaffected.
-  - **deepseek** — the API `usage` block (previously parsed then discarded).
-  - **codex** — the `tokens used <N>` stdout footer (total only).
-  - **gemini / mock** — report nothing.
-  - **Fail-safe:** any parse miss degrades to "no figure for that step", never breaks the run.
-- Written per step to `events.jsonl`; aggregated by `finish()` to `usage.json` + a **Token usage** table in `transcript.md` + a one-line total in `STATUS`. `python3 orchestrate.py show <run-id>` prints totals + a by-agent breakdown.
-- `cost_usd` is **claude-only** (deepseek/codex unpriced). `metered` = number of steps that carried a token figure.
+- Each **invocation** captures `usage` (normalized `{input, input_fresh, input_cache_creation, input_cache_read, output, total}`) + `cost_usd`. A class the transport does not report is `null`, never a silent `0`; a reported `0` stays `0`.
+  - **claude** — `--output-format json` (auto-injected by the adapter); prefers `.modelUsage` (all models, same scope as `.total_cost_usd`), else the top-level `.usage` fresh/cache-creation/cache-read/output fields, plus `.total_cost_usd`. `.result` is parsed back out as the text so verdict parsing is unaffected — **unless** the body is an error, in which case the text is empty and the body is kept in the failure record instead.
+  - **deepseek / gemini (API)** — the OpenAI-style `usage` block: `prompt_tokens` → `input`, `completion_tokens` → `output`, `total_tokens` → `total`; no cache-class breakdown.
+  - **codex** — the `tokens used <N>` stdout footer (bare total only).
+  - **mock** — reports nothing (`usage=null`).
+  - **Fail-safe:** any parse miss degrades to "no figure for that invocation", never breaks the run.
+- Recording only `.usage.input_tokens` under-reported one real step 55,599x (52 stored for a true 2,891,127 input) because the two cache classes were dropped; that is why every class is now stored separately.
+- Written per invocation as an `agent_attempt` event in `events.jsonl` — a same-agent retry, a shift to another vendor and a verdict repair each spend tokens and are each recorded against the agent that incurred them. `finish()` aggregates those attempts into `usage.json` (`schema_version: 2`) + a **Token usage** table in `transcript.md` + a one-line total in `STATUS`. `python3 orchestrate.py show <run-id>` prints totals, input classes, coverage and a by-agent breakdown; it also still renders pre-schema-2 runs, labelled as legacy.
+- **No price tables exist in this tool.** `cost_usd` is provider-reported (claude only today); an agent whose transport prices nothing is **unmetered**, not `$0.00`, and `coverage` says how many attempts reported each figure. `steps`/`metered` count distinct logical steps; `attempts` counts real invocations.
 
 ## Economy levers (all quality-neutral)
 - **Pointer task briefs** — reference files/sections; don't inline code maps or long docs.

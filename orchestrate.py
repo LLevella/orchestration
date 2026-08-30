@@ -31,7 +31,7 @@ from orchestrator.config import (BASE, WORKFLOWS, ConfigError, RunContext,  # no
                                  load_config, project_base, resolve_repos)
 from orchestrator.engine import HUMAN_REQUIRED, SUCCESS_STATUSES, Engine  # noqa: E402
 from orchestrator.guard import GitGuard  # noqa: E402
-from orchestrator.transcript import Transcript  # noqa: E402
+from orchestrator.transcript import Transcript, fmt_scope_cost  # noqa: E402
 
 # Run history defaults to the tool's own runs/ (gitignored). A project that would
 # rather keep its history with the project - the tool is shared, the runs are not -
@@ -406,7 +406,13 @@ def _run(workflow, args):
 
 
 def _print_usage(run_dir):
-    """Print the token-usage summary (from usage.json) if the run produced one."""
+    """Print the token-usage summary (from usage.json) if the run produced one.
+
+    Reads BOTH shapes: schema_version 2 (per-attempt rows, every input class,
+    explicit coverage) and the 200 pre-existing runs that have no schema_version.
+    Historical runs are never rewritten — they are labelled instead, because their
+    numbers really are incomplete: cache-class input was not recorded at all, and
+    an unpriced transport was summed in as $0.00 rather than as unmetered spend."""
     f = run_dir / "usage.json"
     if not f.exists():
         return
@@ -415,15 +421,36 @@ def _print_usage(run_dir):
     except (json.JSONDecodeError, OSError):
         return
     t = u.get("totals", {})
+    version = u.get("schema_version")
+    cost_label = "provider-reported cost" if version else "cost(claude, legacy)"
     print(f"\nToken usage (totals): in {t.get('input')} / out {t.get('output')} / "
-          f"total {t.get('total')} · cost(claude) ${t.get('cost_usd', 0):.4f} · "
+          f"total {t.get('total')} · {cost_label} {fmt_scope_cost(t)} · "
           f"{t.get('steps')} steps ({t.get('metered')} metered)")
+    if not version:
+        print("  (legacy usage record, schema_version absent: input is fresh-only "
+              "— cache-creation/cache-read were never recorded — and unpriced "
+              "transports were counted as $0.00 rather than unmetered)")
+    else:
+        cov = (u.get("coverage") or {}).get("cost_usd") or {}
+        attempts = t.get("attempts") or cov.get("attempts") or 0
+        priced = cov.get("reported_attempts") or 0
+        print(f"  input classes: fresh {t.get('input_fresh')} / cache-create "
+              f"{t.get('input_cache_creation')} / cache-read {t.get('input_cache_read')}")
+        print(f"  {attempts} attempt(s), {priced} priced by the provider; "
+              f"{attempts - priced} unmetered (no price reported — NOT $0.00)")
     by_agent = u.get("by_agent", {})
     if by_agent:
         print("  by agent (by total tokens):")
         for a, b in sorted(by_agent.items(), key=lambda kv: -(kv[1].get("total") or 0)):
-            print(f"    {a:15s} steps {b.get('steps'):>2}  total {b.get('total'):>9}  "
-                  f"${b.get('cost_usd', 0):.4f}")
+            # A legacy row has no attempt count; do not print its step count under
+            # an "attempts" heading, which would invent a figure it never recorded.
+            calls = (f"  attempts {b.get('attempts') or 0:>2}"
+                     if b.get("attempts") is not None else "")
+            # Per-AGENT cost obeys the same rule as the totals: a codex/gemini row
+            # reads `unmetered`, never `$0.0000`. A run-wide coverage note cannot
+            # make a zero-dollar row for an unpriced transport true.
+            print(f"    {a:15s} steps {b.get('steps') or 0:>2}{calls}  "
+                  f"total {b.get('total') or 0:>9}  {fmt_scope_cost(b)}")
     print(f"  full breakdown: {f}")
 
 

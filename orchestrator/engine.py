@@ -11,9 +11,10 @@ import hashlib
 import re
 import time
 
+from . import failures
 from .adapters import OK, AgentResponse
 from .guard import GuardViolation
-from .roster import Roster, is_unavailable, is_transient
+from .roster import Roster
 from .verdicts import ROLE_VERDICTS, extract_verdict
 
 PASS = "PASS"
@@ -69,18 +70,35 @@ def _norm_hash(text: str) -> str:
 
 
 def _sum_opt(a, b):
-    """Sum two Optional[int] token counts; None only if both are None."""
+    """Sum two Optional numbers; None only if BOTH are None.
+
+    Amendment A5: these helpers are NULL-PRESERVING OVER REPORTED VALUES, not
+    lossy. A transport that reports nothing at all contributes nothing and does
+    not erase the other leg's known figure (that is the "every REPORTED entry"
+    rule the multi-model usage normalizer uses); a transport that DOES report but
+    omits a component makes that component null in the merge — see _merge_usage —
+    so a partial sum can never be presented as a complete one."""
     if a is None and b is None:
         return None
     return (a or 0) + (b or 0)
 
 
 def _merge_usage(a, b):
-    """Element-wise sum of two normalized usage dicts (input/output/total)."""
-    if not a and not b:
+    """Merge two normalized usage dicts, null-preserving per amendment A5.
+
+    Only usage objects that were actually REPORTED take part. Within them a
+    component is summed only if EVERY participating object reports it; otherwise
+    it is None. Per-invocation figures are never affected by this — they are
+    journaled verbatim as attempt records, which is what usage.json aggregates."""
+    parts = [u for u in (a, b) if u]
+    if not parts:
         return None
-    a, b = a or {}, b or {}
-    return {k: _sum_opt(a.get(k), b.get(k)) for k in set(a) | set(b)}
+    keys = set().union(*(set(u) for u in parts))
+    out = {}
+    for k in keys:
+        vals = [u.get(k) for u in parts]
+        out[k] = None if any(v is None for v in vals) else sum(vals)
+    return out
 
 
 def _strip_verdict_block(text: str, header: str) -> str:
@@ -174,6 +192,7 @@ class Engine:
         # agent in the chain. Terminates because each failure marks one more agent
         # exhausted -> the chain eventually yields None -> a clear AgentError.
         retried_transient: set[str] = set()
+        attempt_no = 0
         while True:
             agent = spec["agent"]
             if agent is None:
@@ -189,16 +208,31 @@ class Engine:
             resp = ctx.adapters[agent].run(system, user_prompt,
                                            allow_edit=allow_edit, step_id=step_id)
             resp.role = role
+            attempt_no += 1
+            # One structured failure per non-OK response, whatever produced it: a P2
+            # adapter supplies its own, an older adapter or a test double is classified
+            # from the bounded head+tail of BOTH its error and its output (the old seam
+            # looked at exactly one of the two).
+            failure = failures.failure_for_response(resp) if resp.status != OK else None
+            if failure is not None:
+                resp.failure = failure
+            self._record_attempt(step_id, phase=phase, iteration=iteration,
+                                 attempt=attempt_no, attempt_kind="primary",
+                                 agent=agent, role=role, resp=resp)
             # Transient server/network blip (HTTP 503, overloaded, socket hang up):
             # retry the SAME agent ONCE (after a short backoff) before evicting it, so a
             # momentary failure does not drop a preferred agent (e.g. gemini tech_lead)
             # for the whole run. Persistent unavailability (quota/auth/billing/spending
             # cap) is NOT retried — it falls straight through to shift-left below.
-            if (resp.status != OK and agent not in retried_transient
-                    and is_transient(resp.error or resp.text)):
+            # `compat_*`, not the descriptive POLICY row: P2 is telemetry, so the set
+            # of failures that retry or shift is exactly the pre-P2 one (a newly
+            # recognised `timeout`/`configuration` must not silently start recovering
+            # — that is P1's job and P1 is not in this change set).
+            if (failure is not None and agent not in retried_transient
+                    and failure.compat_retry_same_agent):
                 retried_transient.add(agent)
                 self.ctx.tx.event(kind="agent_retry", step=step_id, cell=cell, agent=agent,
-                                  detail=(resp.error or resp.text or "")[:200])
+                                  detail=failures.operator_reason(resp)[:200])
                 self.ctx.tx.md(f"\n> ↻ `{agent}` transient failure on **{cell or role}** "
                                f"→ retrying same agent once after "
                                f"{TRANSIENT_RETRY_BACKOFF_S:g}s.\n")
@@ -214,10 +248,29 @@ class Engine:
             if (parse and resp.status == OK and role in ROLE_VERDICTS
                     and extract_verdict(role, resp.text) is None):
                 resp = self._repair_verdict(step_id, agent, role, system,
-                                            user_prompt, resp, allow_edit)
+                                            user_prompt, resp, allow_edit,
+                                            phase=phase, iteration=iteration)
             return self._finalize(step_id, agent, role, system, user_prompt,
                                    resp, before, parse, iteration, phase, allow_edit,
                                    branches_before)
+
+    def _record_attempt(self, step_id, *, phase, iteration, attempt, attempt_kind,
+                        agent, role, resp):
+        """Journal ONE adapter invocation, immediately after it returns.
+
+        `agent_attempt` is the source of truth for usage, provider-reported cost
+        and failures: a retry, a shift to another vendor and a verdict repair each
+        incur real spend but collapse into a single logical `step`, so counting
+        steps alone silently loses them. Additive — the logical `step` event and
+        the resume cache are untouched (resume replays only kind=step/status=OK,
+        and a replayed step records no attempt because nothing was invoked)."""
+        failure = getattr(resp, "failure", None)
+        self.ctx.tx.attempt(step=step_id, phase=phase, iteration=iteration,
+                            attempt=attempt, attempt_kind=attempt_kind,
+                            agent=agent, role=role, status=resp.status,
+                            duration=round(resp.duration or 0.0, 3),
+                            usage=resp.usage, cost_usd=resp.cost_usd,
+                            failure=failure.to_dict() if failure is not None else None)
 
     def _shift_if_exhausted(self, step_id, cell, agent, resp) -> bool:
         """If `resp` is an EXHAUSTED-class failure for a roster-managed cell, drop
@@ -225,13 +278,17 @@ class Engine:
         agent is now in the cell (so the caller should retry)."""
         if resp.status == OK or not cell or not (self.roster and self.roster.enabled):
             return False
-        if not is_unavailable(resp.error or resp.text):
+        # Same seam as before P2 (`is_unavailable`), now reading head+tail of BOTH
+        # streams instead of one of them. Deliberately NOT `roster_unavailable`,
+        # which is the P1 policy description: shifting on a timeout or a missing
+        # binary would be new recovery behaviour, not new telemetry.
+        if not failures.failure_for_response(resp).compat_roster_unavailable:
             return False
         self.roster.mark_exhausted(agent)
         self._apply_roster_assignment()
         nxt = self.ctx.workflows[self.workflow].get(cell, {}).get("agent")
         self.ctx.tx.event(kind="roster_shift", step=step_id, cell=cell, exhausted=agent,
-                          next_agent=nxt, detail=(resp.error or resp.text or "")[:200])
+                          next_agent=nxt, detail=failures.operator_reason(resp)[:200])
         self.ctx.tx.md(f"\n> ⤵ `{agent}` exhausted on cell **{cell}** → shift-left to "
                        f"`{nxt or 'NONE'}`, retrying.\n")
         return bool(nxt and nxt != agent)
@@ -290,11 +347,16 @@ class Engine:
         verdict = extract_verdict(role, resp.text) if parse else None
         ctx.tx.step(step_id, agent, role, system, user_prompt, resp, verdict, iteration, phase)
         if resp.status != OK:
+            # Quote the provider's OWN words. `returned ERROR: no detail` was the
+            # operator-facing face of P2: the CLI wrote nothing to stderr, so the real
+            # message ("You've hit your session limit · resets 10:30pm") sat unread in
+            # a JSON body the adapter had already thrown away.
             raise AgentError(f"agent '{agent}' ({role}) returned {resp.status}: "
-                             f"{resp.error or 'no detail'}")
+                             f"{failures.operator_reason(resp)}")
         return resp, verdict
 
-    def _repair_verdict(self, step_id, agent, role, system, user_prompt, resp, allow_edit):
+    def _repair_verdict(self, step_id, agent, role, system, user_prompt, resp, allow_edit,
+                        *, phase, iteration):
         """`resp` succeeded but carries no parseable verdict. Re-prompt the SAME
         agent (bounded by VERDICT_REPAIR_ATTEMPTS) to re-emit ONLY its verdict
         block, then append it to the original text so the analysis is preserved
@@ -302,7 +364,11 @@ class Engine:
         fails, returns it unchanged so _finalize fail-safes as before.
 
         Called between the live invocation and _finalize, so the read-only guard
-        still brackets these extra invocations (no edit can slip through)."""
+        still brackets these extra invocations (no edit can slip through).
+
+        `phase`/`iteration` are carried in only so each repair invocation can be
+        journaled as its own attempt record — a repair costs real tokens even when
+        it fails, and those used to vanish."""
         spec = ROLE_VERDICTS.get(role)
         if not spec or VERDICT_REPAIR_ATTEMPTS <= 0:
             return resp
@@ -330,6 +396,11 @@ class Engine:
             )
             rresp = self.ctx.adapters[agent].run(system, repair_prompt,
                                                  allow_edit=allow_edit, step_id=step_id)
+            if rresp.status != OK and getattr(rresp, "failure", None) is None:
+                rresp.failure = failures.failure_for_response(rresp)
+            self._record_attempt(step_id, phase=phase, iteration=iteration,
+                                 attempt=attempt, attempt_kind="verdict_repair",
+                                 agent=agent, role=role, resp=rresp)
             if rresp.status == OK and extract_verdict(role, rresp.text):
                 resp.text = ((resp.text or "").rstrip()
                              + f"\n\n----- verdict repair (attempt {attempt}) -----\n"

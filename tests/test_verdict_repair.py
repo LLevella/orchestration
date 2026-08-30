@@ -18,13 +18,20 @@ ROLE = "Root Cause Investigator"
 
 class _Tx:
     def __init__(self):
-        self.events, self.mds = [], []
+        self.events, self.mds, self.attempts = [], [], []
 
     def event(self, **kw):
         self.events.append(kw)
 
     def md(self, text):
         self.mds.append(text)
+
+    def attempt(self, **kw):
+        """Stub for the P2 attempt-telemetry helper: _repair_verdict now journals
+        every repair invocation (they cost real tokens even when they fail), so a
+        transcript double must accept `attempt(...)`. It also needs the phase and
+        iteration the calls below now pass in."""
+        self.attempts.append(kw)
 
 
 class _Adapter:
@@ -58,7 +65,8 @@ class TestVerdictRepair(unittest.TestCase):
                                       "HYPOTHESIS_READY_FOR_REFUTATION\n\n## Hypotheses\n...")
         ad = _Adapter([repaired])
         out = _engine(ad)._repair_verdict("inv.investigator", "claude", ROLE,
-                                          "sys", "ORIGINAL-TASK: ER rle_decap=0", orig, allow_edit=True)
+                                          "sys", "ORIGINAL-TASK: ER rle_decap=0", orig,
+                                          allow_edit=True, phase="investigation", iteration=1)
         self.assertEqual(extract_verdict(ROLE, out.text), "HYPOTHESIS_READY_FOR_REFUTATION")
         self.assertIn("Investigation complete", out.text)  # original analysis kept
         self.assertIn("ORIGINAL-TASK: ER rle_decap=0", ad.last_prompt)  # repair carries the brief
@@ -70,7 +78,8 @@ class TestVerdictRepair(unittest.TestCase):
         good = AgentResponse("claude", OK,
                              text="## Investigator Verdict\nNO_DEFECT_FOUND")
         ad = _Adapter([bad, good])
-        out = _engine(ad)._repair_verdict("s", "claude", ROLE, "sys", "task", orig, allow_edit=False)
+        out = _engine(ad)._repair_verdict("s", "claude", ROLE, "sys", "task", orig,
+                                          allow_edit=False, phase="investigation", iteration=2)
         self.assertEqual(extract_verdict(ROLE, out.text), "NO_DEFECT_FOUND")
         self.assertEqual(ad.calls, 2)
 
@@ -78,7 +87,8 @@ class TestVerdictRepair(unittest.TestCase):
         orig = AgentResponse("claude", OK, text="no verdict here")
         bad = [AgentResponse("claude", OK, text="nope") for _ in range(VERDICT_REPAIR_ATTEMPTS)]
         ad = _Adapter(bad)
-        out = _engine(ad)._repair_verdict("s", "claude", ROLE, "sys", "task", orig, allow_edit=True)
+        out = _engine(ad)._repair_verdict("s", "claude", ROLE, "sys", "task", orig,
+                                          allow_edit=True, phase="investigation", iteration=3)
         self.assertIsNone(extract_verdict(ROLE, out.text))   # -> _finalize fail-safes
         self.assertEqual(ad.calls, VERDICT_REPAIR_ATTEMPTS)
 
@@ -89,8 +99,9 @@ class TestVerdictRepair(unittest.TestCase):
                                  text="## Investigator Verdict\nNO_DEFECT_FOUND",
                                  duration=2.0, usage={"input": 1, "output": 2, "total": 3},
                                  cost_usd=0.1)
-        out = _engine(_Adapter([repaired]))._repair_verdict("s", "claude", ROLE,
-                                                            "sys", "task", orig, allow_edit=False)
+        out = _engine(_Adapter([repaired]))._repair_verdict("s", "claude", ROLE, "sys", "task",
+                                                            orig, allow_edit=False,
+                                                            phase="investigation", iteration=4)
         self.assertEqual(out.usage["total"], 33)
         self.assertEqual(out.duration, 3.0)
         self.assertAlmostEqual(out.cost_usd, 0.6)

@@ -251,7 +251,8 @@ Properties worth knowing, because they are deliberate:
 <tool>/                        REUSABLE — everything here works for any project
 ├─ orchestrate.py            entrypoint (doctor / chains / arch / dev / inv /
 │                            review / implreview / mrreview / resume / show)
-├─ orchestrator/             config, verdicts, guard, transcript, adapters, engine, mr
+├─ orchestrator/             config, verdicts, guard, transcript, adapters, engine,
+│                            failures (provider-neutral failure telemetry), mr
 ├─ config/agents.json        agent↔model↔command binding (authoritative)
 ├─ config/workflows.json     workflows: chains, step→role bindings, limits, rosters
 ├─ config/project.example.json  template for the per-project layer
@@ -261,7 +262,8 @@ Properties worth knowing, because they are deliberate:
 ├─ fixtures/<wf>/<name>.json scripted mock responses (pass, escalate)
 └─ runs/<run-id>/            default run history (gitignored), unless paths.runs_dir
                              moves it out: run.json, events.jsonl, transcript.md,
-                             iterations/, artifacts/, disagreements.md, STATUS
+                             iterations/, artifacts/, disagreements.md, STATUS,
+                             usage.json (token/cost accounting, schema_version 2)
 
 <project>/                     NOT reusable — lives with the project, never in the tool
 ├─ project.json              paths, guard, and where the context files are
@@ -269,6 +271,23 @@ Properties worth knowing, because they are deliberate:
 ├─ roles-context/<role>.md   extra context only that role sees
 └─ runs/                     run history, when paths.runs_dir points here
 ```
+
+### Token and cost accounting
+
+`usage.json` (`schema_version: 2`) and the `agent_attempt` events in
+`events.jsonl` are per-**invocation**, not per logical step: a same-agent
+transient retry, a shift to another vendor and a verdict repair each spend real
+tokens and are each recorded with the agent that incurred them. Every input
+class Claude reports — fresh, cache-creation and cache-read — is stored
+separately, because a step whose input is 95% cache-read is not the same event
+as one that paid for all of it fresh.
+
+Nothing is estimated: the tool keeps **no price tables**. Sums include only the
+figures a provider actually reported, and `coverage` states how many attempts
+reported each one, so "no reported cost" (an unmetered transport — codex,
+gemini, deepseek) stays distinguishable from a measured `0.0`. Runs recorded
+before schema 2 are never rewritten; `show` labels them as legacy and says what
+their numbers omit.
 
 ## Safety model
 
@@ -304,6 +323,20 @@ Properties worth knowing, because they are deliberate:
   The `validation` config block is reserved policy and is read by no code yet.
 - **Fail-safe verdicts:** an unparseable/missing verdict is treated as
   HUMAN_REQUIRED, never a silent PASS.
+- **An error body is never an answer.** A failed invocation gets empty
+  `AgentResponse.text`, so a provider error payload cannot be read as the
+  agent's reply or satisfy a gate even when it happens to contain a valid
+  verdict token. The raw body is kept in the structured failure record
+  (bounded head+tail) and shown to the operator instead.
+- **A transport that returns nothing is a failure.** A CLI that exits 0 having
+  printed nothing produced no answer, so it is recorded as one rather than
+  passed on as an empty reply.
+- **Richer failure telemetry changed no recovery path.** A failure is now
+  *described* precisely (kind, scope, HTTP status, provider code, reset time),
+  but which failures retry the same agent or shift the roster is still decided
+  by the pre-existing markers — `FailureInfo.compat_*` is what the engine acts
+  on, and it is the unchanged legacy verdict. Acting on the richer
+  classification is failure-domain-aware recovery: a separate change.
 - **Always-finalized history:** even an unexpected error writes a STATUS and
   records the traceback to `events.jsonl`.
 - **Mock mode** runs the full state machine with zero credentials.

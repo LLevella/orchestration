@@ -25,8 +25,14 @@ falls back to the next live Claude in the chain (same family), never elsewhere.
 
 Resolution is recomputed on every runtime EXHAUSTED, so a mid-run dropout shifts
 only the not-yet-run cells and the run continues instead of aborting. Already-run
-cells never change: agents only move toward exhaustion during a run (never
-recover), so assignment is monotonic for the cells that have already executed.
+cells never change.
+
+That last property is NOT an invariant of the roster: it holds only because
+`exhausted` is currently write-once — eviction is the sole transition, and there
+is no re-admission, so eligibility can only shrink within a run. Any future
+re-admission (returning an agent to service after a temporary block expires, or
+on an explicit `resume`) breaks the monotonicity claim, and whatever adds it must
+also state how already-executed cells stay stable.
 """
 from __future__ import annotations
 
