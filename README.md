@@ -25,7 +25,7 @@ field in role-file frontmatter is intentionally **ignored**, and role files are
 | Agent | Model | Effort / reasoning | Roles | Can edit code? |
 |---|---|---|---|---|
 | **Claude** | Opus 4.8 (`claude-opus-4-8`) | extended thinking `MAX_THINKING_TOKENS=16000` ("think hard" tier) | Software Engineering Developer, Responsible Developer, **Root Cause Investigator** | ✅ yes — the only writer |
-| **Codex** | GPT‑5.5 | `model_reasoning_effort = xhigh` (max) | System Architect, Software Engineering Code Reviewer, **Adversarial Verifier** | ❌ read-only |
+| **Codex** | GPT‑5.5 | `model_reasoning_effort = xhigh` (max) | Architecture Author, System Architect, Software Engineering Code Reviewer, **Adversarial Verifier** | ❌ read-only |
 | **Gemini** | `gemini-pro-latest` | default (gemini CLI exposes no effort flag; the model reasons by default) | System Architecture Reviewer, Technical Lead, **Hypothesis Refuter** | ❌ read-only |
 | **DeepSeek** | `deepseek-reasoner` | intrinsic (a reasoning model; no effort parameter is sent) | Arbitration Reviewer / Third Opinion, **Investigation Arbiter** | ❌ read-only |
 
@@ -258,7 +258,9 @@ Properties worth knowing, because they are deliberate:
 ├─ config/project.example.json  template for the per-project layer
 ├─ config/project.json       -> the real project layer (gitignored; usually a symlink)
 ├─ roles/<Role Name>.md      BASE role prompts — identical for every project
-├─ prompts/                  architecture-authoring wrapper (does not modify roles)
+├─ prompts/                  optional role-prompt wrappers (appended to a role, do not
+│                            modify it); none configured since the architecture author
+│                            became its own role
 ├─ fixtures/<wf>/<name>.json scripted mock responses (pass, escalate)
 └─ runs/<run-id>/            default run history (gitignored), unless paths.runs_dir
                              moves it out: run.json, events.jsonl, transcript.md,

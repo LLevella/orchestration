@@ -13,6 +13,10 @@ import re
 ROLE_VERDICTS = {
     "System Architecture Reviewer": ("Architecture Verdict", ["PASS", "NEEDS_FIX", "NOT_APPLICABLE"]),
     "System Architect": ("Architect Verdict", ["PASS", "NEEDS_FIX", "NOT_APPLICABLE", "ESCALATE_TO_TECH_LEAD"]),
+    # Architecture-workflow author. It OWNS the proposal and is called parse=False (its
+    # output IS the proposal document), so this verdict is NOMINAL — present only so the
+    # config consistency guard (every configured role needs a verdict spec) is satisfied.
+    "Architecture Author": ("Architecture Proposal", ["DRAFTED"]),
     "Software Engineering Code Reviewer": ("Code Review Verdict", ["PASS", "NEEDS_FIX"]),
     "Technical Lead": ("Tech Lead Verdict", [
         "READY_FOR_HUMAN_REVIEW", "DEVELOPER_NEEDS_FIX",

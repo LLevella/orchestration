@@ -14,6 +14,7 @@ Two properties, each pinned against the gap that motivated it:
      file edited mid-run - by the very developer agent the run is reviewing - cannot
      change the rules a later step is judged by.
 """
+import copy
 import io
 import json
 import os
@@ -318,9 +319,17 @@ class TestPromptsAreFrozenAtRunStart(unittest.TestCase):
         directory and tampers with a COPY there: editing the shipped prompt - even
         under a try/finally - would corrupt the checkout if the process were killed
         mid-test, and a concurrent run would snapshot the tampered text.
+
+        The freeze covers the wrappers a WORKFLOW configures - those are the only ones
+        the engine can pass to load_role (engine.py: `spec.get("wrapper")`). Since DEV-07
+        folded prompts/architecture_author.md into the `Architecture Author` role, no
+        shipped workflow configures one, so the test configures a synthetic wrapper on a
+        cell exactly as workflows.json would, and pins the property through that.
         """
-        wrapper = "architecture_author.md"           # the only wrapper any workflow configures
+        wrapper = "w.md"
         _agents, workflows = load_config()
+        workflows = copy.deepcopy(workflows)
+        workflows["development"]["architect"]["wrapper"] = wrapper
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             for r in self._configured_roles(workflows):

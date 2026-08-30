@@ -15,7 +15,9 @@ and the `gates` report over it) does not exist in this copy - the stage was remo
 These assert on the real prompt builders, not on a model's answer.
 """
 import json
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -95,9 +97,21 @@ class TestGlobalPolicy(unittest.TestCase):
         self.assertTrue(self.ctx.load_role(role).endswith(GLOBAL_POLICY))
 
     def test_policy_survives_a_wrapper(self):
-        wrapper = "architecture_author.md"
-        self.assertTrue((ORCH / "prompts" / wrapper).exists(), "wrapper fixture missing")
-        text = self.ctx.load_role("System Architect", wrapper)
+        """The wrapper mechanism still puts the policy last.
+
+        No workflow configures a wrapper any more: `prompts/architecture_author.md` was the
+        only one, and DEV-07 folded it into the `Architecture Author` role and deleted it (the
+        author was being handed a reviewer's role plus a wrapper contradicting it). load_role
+        still supports wrappers, so the property is pinned against a wrapper written into a
+        patched BASE rather than against a shipped file.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "prompts").mkdir()
+            (d / "prompts" / "w.md").write_text("WRAPPER TEXT\n", encoding="utf-8")
+            with unittest.mock.patch("orchestrator.config.BASE", d):
+                text = self.ctx.load_role("System Architect", "w.md")
+        self.assertIn("WRAPPER TEXT", text)
         self.assertTrue(text.endswith(GLOBAL_POLICY))
 
     def test_policy_states_both_rules(self):

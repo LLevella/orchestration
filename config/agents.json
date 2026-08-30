@@ -178,6 +178,7 @@
         "Investigation Arbiter",
         "Technical Lead",
         "System Architect",
+        "Architecture Author",
         "Adversarial Reviewer",
         "Review Arbiter",
         "Review Reviser",
@@ -225,6 +226,7 @@
       },
       "roles": [
         "System Architect",
+        "Architecture Author",
         "Implementation Architect",
         "Advanced Developer Reviewer",
         "DevOps Reviewer"
@@ -296,6 +298,7 @@
       "timeout_s": 1800,
       "roles": [
         "System Architect",
+        "Architecture Author",
         "Software Engineering Code Reviewer",
         "Adversarial Verifier",
         "Hypothesis Refuter",
@@ -366,5 +369,6 @@
       "_comment_2026_08_30": "2026-08-30 (P1): deepseek gains the READ-ONLY 'Developer Verifier' role so it can be the architecture developer_verifier pin's cross-family fallback when the whole Anthropic account is blocked (workflows.json architecture.roster.pinned.developer_verifier). can_edit stays false — the fallback reviews, it never writes — and it is used ONLY on classified account/provider evidence, never because a Claude is merely missing locally. It cannot hold the arbiter cell at the same time (one agent, one cell), so an account-blocked architecture run that reaches arbitration pauses instead of borrowing the judge; that is the trade the pin's `lost_assurance` records."
     }
   },
+  "_comment_2026_08_31": "2026-08-31 (DEV-07, architecture author/reviewer split): the new READ-ONLY role 'Architecture Author' was added to the allowlist of exactly the three agents that already carried 'System Architect' (codex, claude_author, claude_haiku), because those three ARE the eligibility set for the architecture author cell and the split must not change who can fill it. 'System Architect' is deliberately kept on all three: it is still the role of development.architect, which reviews a real diff. The older notes below that describe the arch author cell as role 'System Architect' (see codex _reenabled_2026_08_20 and workflows.json architecture.roster._author_fallback_2026_08_27) are kept verbatim as the historical record; as of this date that cell's role is 'Architecture Author'.",
   "_comment_2026_08_30": "2026-08-30 (P1, failure-domain metadata): `provider` and `availability_group` are non-secret SCHEDULING labels — they carry no key, no account id and no user data. They tell the roster WHICH AGENTS ONE FAILURE TAKES OUT: an agent name covers an agent-specific failure (a wedged CLI, a missing binary), `availability_group` covers everything sharing credentials / a session limit / a spending cap, and `provider` covers the vendor's whole service (a 503/529). All six claude_* aliases share 'anthropic-default-account' because the established account limits hit them together: in 11 of the 16 runs killed by an exhausted cell the block was account-level, so walking claude_reviewer -> claude -> claude_sonnet could not have recovered them at any depth — each alias just re-hit the same cap. An agent that declares neither field defaults both to its own name (test doubles), which keeps unrelated failures isolated. NOTE on the 2026 top comment above: the per-agent `roles` list is no longer advisory — the roster ENFORCES it (an agent that does not declare a cell's role is skipped for that cell, and an agent with no `roles` list at all holds no cell), and a cell marked `requires_edit` in workflows.json additionally requires can_edit=true. The old comment is kept verbatim as the historical record."
 }

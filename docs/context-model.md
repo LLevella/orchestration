@@ -11,7 +11,7 @@ Two goals, **no quality loss**:
 ### architecture (`arch`) — already lean
 | Role (agent) | Context it gets |
 |---|---|
-| Author / System Architect (codex) | task + a **truncated** overview of existing arch docs (`read_existing_arch`: ≤8 files × 1500 chars) + reads the full doc on demand; plus its previous draft + the last review each iteration |
+| Author / Architecture Author (codex) | task + a **truncated** overview of existing arch docs (`read_existing_arch`: ≤8 files × 1500 chars) + reads the full doc on demand; plus its previous draft + the last review each iteration |
 | Developer-Verifier (claude_reviewer, PRIMARY gate) · Tech-Lead · Arbiter | the **draft** (work-product) + dispute history — NOT re-inlined design docs |
 
 ### development (`dev`)

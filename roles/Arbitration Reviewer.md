@@ -169,4 +169,4 @@ Reason:
 
 ### Final Note for Human
 
-* What Irina should know before deciding.
+* What the human reviewer should know before deciding.
