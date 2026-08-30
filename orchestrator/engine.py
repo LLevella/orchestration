@@ -155,6 +155,32 @@ def _demote_headings(text: str, levels: int = 2) -> str:
                   text or "", flags=re.MULTILINE)
 
 
+def unreachable_cells(workflow: str, wf_block: dict, *, iterate: bool = False) -> dict:
+    """{cell: why} for the roster cells this run CANNOT call, from what is already
+    known at run start: the run's mode and the cell's own `enabled` flag.
+
+    The roster is resolved over these cells' complement, so an unreachable cell
+    reserves no agent (roster.py). Only IMPOSSIBILITY belongs here — never a cell that
+    merely MIGHT not be called. The arch/dev/inv arbiter fires only on deadlock and
+    keeps its reservation on purpose: the judge has to exist at the moment a deadlock
+    appears, and handing its agent to a panel seat would mean discovering, at the worst
+    possible time, that nobody independent is left. `review.arbiter` is not conditional
+    at all (it synthesises every run); `review.reviser` is — it runs only inside the
+    `--iterate` refine loop, and a one-shot review that reserved it turned an
+    adversarial three-family panel into two thirds one vendor (Irina 2026-08-30, from
+    run 20260830T113210Z-review-1aa9)."""
+    out = {}
+    for cell in ((wf_block.get("roster") or {}).get("cells") or []):
+        spec = wf_block.get(cell)
+        if isinstance(spec, dict) and not spec.get("enabled", True):
+            out[cell] = "disabled in config (enabled: false)"
+    if workflow == "review" and not iterate:
+        # `_run_review` computes exactly the same condition for its iteration budget
+        # (`maxit = ... if iterate else 1`); the reviser is only reached inside that loop.
+        out.setdefault("reviser", "one-shot review — the reviser runs only with --iterate")
+    return out
+
+
 class Engine:
     def __init__(self, ctx, workflow: str):
         self.ctx = ctx
@@ -236,12 +262,17 @@ class Engine:
                 f"`{rec.get('configured_primary')}`. Those steps are replayed, so the "
                 f"assurance stays lost: {rec.get('lost_assurance', '')}\n")
 
-    def _setup_roster(self):
+    def _setup_roster(self, *, iterate=False):
         """Build the roster from the workflow's `roster` block and resolve the
         opening assignment. No-op (static per-cell `agent` bindings stand) when the
-        workflow declares no roster."""
+        workflow declares no roster.
+
+        The cells this run cannot call are resolved FIRST and handed to the roster, so
+        the assignment covers the cells actually in play and nothing is held in reserve
+        for a step that cannot happen."""
         wf = self.ctx.workflows[self.workflow]
-        self.roster = Roster(wf, self.ctx.adapters)
+        self.roster = Roster(wf, self.ctx.adapters,
+                             excluded=unreachable_cells(self.workflow, wf, iterate=iterate))
         self._carry_forward_degradations()
         if not self.roster.enabled:
             return
@@ -274,6 +305,20 @@ class Engine:
         ctx = self.ctx
         role = spec["role"]
         cell = spec.get("_cell")
+
+        # An excluded cell reserved no agent, so reaching it means the state machine
+        # called a step this run declared impossible. Fail loudly here: falling through
+        # would either invoke whatever static binding config left in the spec, or read
+        # as an ordinary "no live agent" pause and send an operator hunting for a
+        # provider outage that never happened.
+        if cell and self.roster is not None and self.roster.is_excluded(cell):
+            why = self.roster.excluded[cell]
+            ctx.tx.event(kind="excluded_cell_called", step=step_id, cell=cell, role=role,
+                         reason=why)
+            raise AgentError(
+                f"internal error: step '{step_id}' called roster cell '{cell}', which "
+                f"this run excluded from the assignment ({why}). No agent was reserved "
+                "for it; refusing to invoke an unassigned cell.")
 
         # Resume: if this exact step (step_id, phase, iteration) already completed
         # in the run we are resuming from, replay its journaled result instead of
@@ -658,7 +703,7 @@ class Engine:
     def run(self, task, arch_ref=None, target=None, iterate=False, max_iters=None,
             mr=None):
         try:
-            self._setup_roster()
+            self._setup_roster(iterate=iterate)
             if self.workflow == "architecture":
                 return self._run_architecture(task)
             if self.workflow == "investigation":

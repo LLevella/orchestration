@@ -390,6 +390,18 @@ gate, is judged by.
   every use records what assurance was lost, in `run.json`, the transcript and
   the final STATUS. A read-only agent can never land in a writing cell: those
   cells declare `requires_edit`, which is enforced on top of the role allowlist.
+- **A cell this run cannot call reserves nobody.** The roster is resolved over the
+  cells actually in play: one switched off with `"enabled": false`, and one the
+  run's MODE never reaches (`review` without `--iterate` never calls the reviser),
+  are excluded before the assignment is computed. Their agents stay available to
+  the cells that do run, and the rest keep their relative order. Only
+  IMPOSSIBILITY counts — the arch/dev/inv arbiter fires only on deadlock and keeps
+  its reservation on purpose, because the judge has to exist at the moment a
+  deadlock appears. Before this, a one-shot `review` held DeepSeek for a reviser
+  that could not run and filled the third panel seat with a second Claude: an
+  adversarial panel of three independent heads was two thirds one vendor, and
+  nothing in the output said so. A cell that is reached anyway is refused as a
+  state-machine bug, never invoked from a stale static binding.
 - **Readiness is checked before the first provider call.** `doctor` and every run
   start share one `Roster.preflight()` over a single frozen availability
   snapshot: per cell it reports who holds it, who else may, and what the real

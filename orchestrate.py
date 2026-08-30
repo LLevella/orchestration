@@ -29,7 +29,8 @@ from orchestrator.adapters import build_adapters  # noqa: E402
 from orchestrator import mr as mrlib  # noqa: E402
 from orchestrator.config import (BASE, WORKFLOWS, ConfigError, RunContext,  # noqa: E402
                                  load_config, project_base, resolve_repos)
-from orchestrator.engine import HUMAN_REQUIRED, SUCCESS_STATUSES, Engine  # noqa: E402
+from orchestrator.engine import (HUMAN_REQUIRED, SUCCESS_STATUSES, Engine,  # noqa: E402
+                                 unreachable_cells)
 from orchestrator.guard import GitGuard  # noqa: E402
 from orchestrator.roster import Roster, availability_snapshot, format_preflight  # noqa: E402
 from orchestrator.transcript import (Transcript, fmt_scope_cost,  # noqa: E402
@@ -297,19 +298,27 @@ def _print_preflight(workflows_cfg, adapters):
 
     Same `Roster.preflight()` object and same renderer the engine writes into a run's
     transcript, so `doctor` and a real run cannot disagree about who would hold which
-    cell. All configured cells are treated as reachable rather than guessing which
-    state-machine branches a run will take, and no provider is contacted: this is local
+    cell. Cells the run's MODE cannot call are resolved by the same
+    `unreachable_cells()` the engine uses, for the DEFAULT invocation of each workflow
+    (`review` without `--iterate`): they reserve no agent and are shown as such, rather
+    than being reported as an assignment no run would make. Which state-machine branches
+    a run then takes is still not guessed, and no provider is contacted: this is local
     readiness, never a claim about remote account health."""
     snapshot = availability_snapshot(adapters)
-    print("\nRoster preflight (per workflow; ✎ = the cell must be able to edit code):")
+    print("\nRoster preflight (per workflow, as invoked with no mode flags; "
+          "✎ = the cell must be able to edit code):")
     for wf in WORKFLOWS:
-        r = Roster(workflows_cfg.get(wf, {}), adapters, snapshot=snapshot)
+        block = workflows_cfg.get(wf, {})
+        r = Roster(block, adapters, snapshot=snapshot,
+                   excluded=unreachable_cells(wf, block))
         if not r.enabled:
             print(f"  {wf}: no roster block (static per-cell agents)")
             continue
         print("\n".join("  " + line for line in
                         format_preflight(wf, r.preflight()).splitlines()))
-    print("\n  READY = every cell survives losing its agent, its account and its provider."
+    print("\n  A cell shown as 'not used in this mode' is not a gap: this run never calls "
+          "it,\n  so it reserves no agent and the ones that do run are filled without it."
+          "\n  READY = every cell survives losing its agent, its account and its provider."
           "\n  DEGRADED / UNASSIGNED do NOT block a run: it starts, and a cell that is "
           "reached with\n  no live agent pauses it (AWAITING_HUMAN, resumable) instead of "
           "discarding finished work.")

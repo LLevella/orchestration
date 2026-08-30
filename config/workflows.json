@@ -187,7 +187,8 @@
       "pinned": {
         "arbiter": "gemini",
         "reviser": "deepseek"
-      }
+      },
+      "_comment_2026_08_30": "2026-08-30 (unreachable cells reserve nobody): the positional line above holds for `review --iterate`; a ONE-SHOT review no longer reserves an agent for the reviser, because that cell runs only inside the --iterate refine loop. Run 20260830T113210Z-review-1aa9 paid for the old behaviour: gemini (arbiter pin) and deepseek (reviser pin) were both held back, so the third lens fell to claude_sonnet and the adversarial panel was codex + claude_reviewer + claude_sonnet — two thirds one vendor, with shared training and shared blind spots, for a reviser step that could not happen. One-shot now assigns correctness=codex, completeness=claude_reviewer, risk=deepseek, arbiter=gemini: four distinct families, as this comment always claimed the panel was. The arbiter pin is unchanged — it synthesises EVERY run and is not conditional."
     },
     "reviewer_correctness": {
       "agent": "codex",

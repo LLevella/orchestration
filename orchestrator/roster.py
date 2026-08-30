@@ -61,9 +61,29 @@ therefore stated and enforced explicitly instead of being inherited (A6):
     that have not run yet; it never reclaims a cell mid-run and never makes the
     role change hands between iterations.
 
+A run resolves its roster over the cells it will ACTUALLY use. The caller passes
+`excluded={cell: why}` for the cells this run cannot call — a cell switched off
+with `"enabled": false`, or one that the run's MODE never reaches (`review`
+without `--iterate` never calls the reviser). An excluded cell reserves NOBODY:
+every pass of `assign()` skips it, so the agent it would have held stays
+available to the cells that do run, while the surviving cells keep their relative
+order and the positional chain is otherwise unchanged. Before this, a one-shot
+`review` held DeepSeek in reserve for a reviser that could not run, and the
+three-lens panel — meant to be three independent heads — was filled with two
+agents of the same vendor (run 20260830T113210Z-review-1aa9).
+
+Only IMPOSSIBILITY belongs in `excluded`. A cell that merely MIGHT not be called
+keeps its reservation: the arch/dev/inv arbiter fires only on deadlock, yet the
+judge must exist at the moment a deadlock appears — freeing its agent to a panel
+seat would mean discovering at the worst possible time that nobody independent is
+left. `review.arbiter` is not conditional at all; it synthesises every run.
+
 When a cell has no eligible agent left, `assign()` yields None for it as before —
 but the engine now PAUSES the run (AWAITING_HUMAN, resumable) instead of
-discarding every completed iteration.
+discarding every completed iteration. An EXCLUDED cell also reads as None, and is
+a different thing: nothing is missing, the run simply never calls it. The two are
+reported apart everywhere (`preflight`, `format_preflight`), and calling an
+excluded cell is a state-machine bug the engine refuses loudly.
 """
 from __future__ import annotations
 
@@ -242,7 +262,7 @@ def availability_snapshot(adapters) -> dict:
 
 
 class Roster:
-    def __init__(self, wf_block, adapters, *, snapshot=None, clock=None):
+    def __init__(self, wf_block, adapters, *, snapshot=None, clock=None, excluded=None):
         r = wf_block.get("roster") or {}
         self.chain = list(r.get("chain") or [])
         self.cells = list(r.get("cells") or [])
@@ -269,7 +289,21 @@ class Roster:
         # the ones it has not seen yet.
         self.degradations: dict[str, dict] = {}
         self.pins = {cell: self._parse_pin(cell, spec) for cell, spec in self.pinned.items()}
+        # {cell: why} for the cells THIS run cannot call (see the module docstring and
+        # `engine.unreachable_cells`). Restricted to declared cells: the roster only
+        # ever speaks about its own cells.
+        self.excluded = {c: why for c, why in (excluded or {}).items() if c in self.cells}
         self.enabled = bool(self.chain and self.cells)
+
+    # ---- cells in play --------------------------------------------------
+    def is_excluded(self, cell: str) -> bool:
+        """Whether this run declared the cell unreachable: never assigned, never called."""
+        return cell in self.excluded
+
+    @property
+    def active_cells(self) -> list:
+        """The declared cells this run may actually call, in declaration order."""
+        return [c for c in self.cells if c not in self.excluded]
 
     # ---- pins ---------------------------------------------------------
     def _parse_pin(self, cell, spec) -> Pin:
@@ -509,14 +543,18 @@ class Roster:
 
     def assign(self) -> dict:
         """Return {cell: agent_or_None} for this instance's availability snapshot and
-        block registry. Zero-argument by contract (A1)."""
+        block registry. Zero-argument by contract (A1).
+
+        Every pass below walks `active_cells`: a cell this run cannot call reserves
+        nobody, and is reported as None at the end (never left holding a stale static
+        binding that a bug could then call silently)."""
         out: dict[str, str | None] = {}
         used: set[str] = set()
         self.degradations = {}
 
         # 0) already-executed cells keep the agent that ran them, while it stays
         #    eligible: re-admission must never make a role change hands mid-run.
-        for cell in self.cells:
+        for cell in self.active_cells:
             a = self.sticky.get(cell)
             if a and a not in used and self._eligible(a, cell):
                 out[cell] = a
@@ -525,7 +563,7 @@ class Roster:
         # 1) pinned cells: the pin's own candidates, in its own order. Cross-family
         #    fallback only on classified account/provider evidence.
         for cell, pin in self.pins.items():
-            if out.get(cell):
+            if out.get(cell) or self.is_excluded(cell):
                 continue
             chosen, degradation = self._resolve_pin(pin, used)
             out[cell] = chosen
@@ -543,8 +581,11 @@ class Roster:
         #    contract. A pin FALLBACK that was not selected stays available to the
         #    positional pass, so adding `deepseek` as the verifier's last resort does
         #    not quietly take DeepSeek out of the all-live architecture arbiter cell.
-        reserved = {p.primary for p in self.pins.values()}
-        for cell in self.cells:
+        #    An EXCLUDED pinned cell reserves nothing either: with `review.reviser`
+        #    out, deepseek is back in the positional pass and the panel is four
+        #    distinct families again.
+        reserved = {p.primary for cell, p in self.pins.items() if not self.is_excluded(cell)}
+        for cell in self.active_cells:
             if cell in self.pins or cell in out:
                 continue
             chosen = next((a for a in self.chain
@@ -553,6 +594,10 @@ class Roster:
             out[cell] = chosen
             if chosen:
                 used.add(chosen)
+
+        # 3) cells this run cannot call: declared, reported, deliberately empty.
+        for cell in self.excluded:
+            out[cell] = None
         return out
 
     # ---- preflight -------------------------------------------------------
@@ -590,11 +635,11 @@ class Roster:
     def preflight(self) -> dict:
         """The single readiness implementation, shared by run startup and `doctor`.
 
-        For every configured cell it reports the current assignment, who MAY hold it,
-        who can be SELECTED right now, who is only a conditional cross-family fallback,
-        and what the deterministic allocator does when the assigned agent / its whole
-        account / its whole provider goes away — including which OTHER cells that loss
-        empties. No provider request is made: this is local readiness, never a claim
+        For every configured cell it reports whether this run uses the cell at all,
+        the current assignment, who MAY hold it, who can be SELECTED right now, who is
+        only a conditional cross-family fallback, and what the deterministic allocator
+        does when the assigned agent / its whole account / its whole provider goes away
+        — including which OTHER cells that loss empties. No provider request is made: this is local readiness, never a claim
         about remote account health."""
         assignment = self.assign()
         cells = []
@@ -605,6 +650,8 @@ class Roster:
             entry = {
                 "cell": cell, "role": self.roles.get(cell),
                 "requires_edit": bool(self.requires_edit.get(cell)),
+                # why this run never calls the cell, or None if it may
+                "excluded": self.excluded.get(cell),
                 "assigned": cur, "candidates": capable,
                 # selectable NOW, as opposed to live-but-locked (see candidate_status)
                 "live_candidates": st["selectable"],
@@ -614,6 +661,12 @@ class Roster:
                 "on_provider_loss": self._simulate(assignment, SCOPE_PROVIDER, cur),
                 "warnings": [],
             }
+            if entry["excluded"]:
+                # Not a readiness fact: the cell is empty because this run does not use
+                # it. Depth and fallback warnings about a cell nobody calls are noise,
+                # and it must never count as "no live agent".
+                cells.append(entry)
+                continue
             if cur is None:
                 entry["warnings"].append(
                     f"no live agent: {len(capable)} configured candidate(s), "
@@ -640,7 +693,8 @@ class Roster:
                         f"losing {label} also empties: {', '.join(collateral)}")
             cells.append(entry)
 
-        unassigned = [c["cell"] for c in cells if c["assigned"] is None]
+        unassigned = [c["cell"] for c in cells
+                      if c["assigned"] is None and not c["excluded"]]
         degrades = sorted({c for e in cells for k in
                            ("on_agent_loss", "on_account_loss", "on_provider_loss")
                            for c in e[k]["lost"]})
@@ -659,6 +713,11 @@ def format_preflight(workflow: str, report: dict) -> str:
     lines = [f"roster preflight [{workflow}]: {report['status']}"]
     for e in report["cells"]:
         seat = f"{e['cell']}{' ✎' if e['requires_edit'] else ''}"
+        if e.get("excluded"):
+            # Distinct from `NONE (no live agent)`: nothing is missing here.
+            lines.append(f"  {seat:24s} -> not used in this mode "
+                         f"({e['excluded']}) — reserves no agent")
+            continue
         conditional = e.get("conditional_candidates") or []
         lines.append(f"  {seat:24s} -> {e['assigned'] or 'NONE (no live agent)'}"
                      f"   live {len(e['live_candidates'])}/{len(e['candidates'])} candidate(s)"
