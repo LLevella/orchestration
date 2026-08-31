@@ -1,16 +1,21 @@
 {
   "name": "techlead_rework",
-  "_comment": "Developer returns FEASIBLE, but the Tech-Lead control review rejects once (ARCHITECT_REVIEW_NEEDS_REVISION) -> back into the Architect<->Developer loop -> Developer FEASIBLE again -> Tech-Lead READY_FOR_HUMAN_REVIEW -> PASS at iteration 2. Proves the Tech-Lead-rejection back-edge (not straight to the arbiter) below techlead_reject_before_arbiter.",
+  "_comment": "Developer returns FEASIBLE, but the Tech-Lead control review rejects once (ARCHITECT_REVIEW_NEEDS_REVISION) -> back into the Architect<->Developer loop -> Developer FEASIBLE again -> Tech-Lead READY_FOR_HUMAN_REVIEW -> PASS at iteration 2. Proves the Tech-Lead-rejection back-edge (not straight to the arbiter) below techlead_reject_before_arbiter. ARCH-02 (2026-08-31, development run 2): that rejection overturns a FEASIBLE result, so it is now assessed for gate departure (arch.semantic_gate_departure) BEFORE it changes tl_rejects. The Tech Lead projects its blocker into the canonical `## Architecture Blocking Findings` manifest (TL-1-B1), the assessment returns JUSTIFIED_GATE_DEPARTURE and retains it, tl_rejects becomes 1 (still below the threshold) and the finding travels to the author as its one-shot active manifest. Draft 2 answers it and returns the `## Blocker Dispositions` transport block, which the engine strips from architecture-draft-02.md / architecture-final.md while the raw arch.author step keeps it - that ACCEPTED disposition is the run's whole quality signal (accepted 1 / eligible 1). The route and terminal status are otherwise unchanged.",
   "responses": {
+    "arch.author": [
+      "# Architecture Proposal: Reworked Feature (draft 1)\n\n## Proposed Design\nComponent X with a unit-test contract.\n",
+      "# Architecture Proposal: Reworked Feature (draft 2)\n\n## Proposed Design\nComponent X with a unit-test contract.\n\n## Reliability / Security / Operability Considerations\nStartup failure of component X is now explicit: the caller receives a typed error and the partially initialised state is torn down before it returns.\n\n## Changelog\n- Made the startup error path explicit (TL-1-B1).\n\n## Blocker Dispositions\n- TL-1-B1 | ACCEPTED | Reliability / Security / Operability Considerations\n"
+    ],
     "arch.dev_review": [
       "## Implementation Feasibility Verdict\nFEASIBLE\n\n## Blocking Implementation Gaps\n- None.\n"
     ],
     "arch.tech_lead": [
-      "## Tech Lead Verdict\nARCHITECT_REVIEW_NEEDS_REVISION\n\n## Ruling\n- Sound but tighten the error-handling section before it ships.\n",
-      "## Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\n## Control Review\n- Error handling now explicit; approved.\n"
+      "## Tech Lead Verdict\nARCHITECT_REVIEW_NEEDS_REVISION\n\n## Architect Blocking Issues Assessment\n- Issue: the Verifier's checklist claims the interfaces are clear.\n- Classification: VALID_BLOCKER\n- Decision: the startup error path is not one of them.\n\n## Architecture Blocking Findings\n\n### B1\nKind: FALSE_VERIFIER_CHECK\nChecklist item: Interfaces & boundaries clear: Yes\nProposal evidence: \"Component X with a unit-test contract.\"\nFailure mechanism: nothing states what the caller receives when component X fails to start, so the implementer must invent the error contract and callers will disagree about it.\nAcceptance criterion: explicit startup error handling\n\n## Final Instructions\n\n### For Architect\n- State the startup error behaviour before this proceeds.\n",
+      "## Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\n## Control Review\n- Error handling now explicit; approved.\n\n## Architecture Blocking Findings\nNONE\n"
+    ],
+    "arch.semantic_gate_departure": [
+      "## Semantic Consistency Verdict\nJUSTIFIED_GATE_DEPARTURE\n\n## Current Finding IDs\nTL-1-B1\n\n## Matched Prior Finding IDs\nNONE\n\n## Retained Tech-Lead Finding IDs\nTL-1-B1\n\n## Rejected Tech-Lead Finding IDs\nNONE\n\n## Cited Evidence\nTL-1-B1 names a specific Developer-Verifier checklist item (\"Interfaces & boundaries clear: Yes\"), quotes the proposal text that contradicts it, and states the failure it produces (an invented error contract). That is a false-checklist-item departure, not a re-labelled advisory note.\n\n## Binding Ruling\nThe finding stands: the Architect must state the startup error behaviour of component X and where it is enforced.\n"
     ]
   },
-  "default": {
-    "arch.author": "# Architecture Proposal: Reworked Feature (draft)\n\n## Proposed Design\nComponent X with explicit startup error handling and a unit-test contract.\n"
-  }
+  "default": {}
 }

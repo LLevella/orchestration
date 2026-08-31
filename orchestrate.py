@@ -53,14 +53,19 @@ def _install_interrupt_handler(tx):
     a killed run leaves no STATUS — ambiguous between "running" and "dead". The
     per-step journal is already written, so the run is resumable regardless; this
     just records a clean terminal state and the resume command. SIGKILL / power
-    loss cannot be caught — recover those with `resume`."""
+    loss cannot be caught — recover those with `resume`.
+
+    `interrupted=True` says this finalization was forced, not reached: a run killed
+    here is incomplete evidence, so any quality signal the engine had already staged
+    is discarded rather than published."""
     import signal
 
     def _handler(signum, _frame):
         try:
             tx.finish(HUMAN_REQUIRED,
                       f"Interrupted by signal {signum} (host freeze/stop/reboot or Ctrl-C). "
-                      f"Resume with: python3 orchestrate.py resume {tx.run_id}")
+                      f"Resume with: python3 orchestrate.py resume {tx.run_id}",
+                      interrupted=True)
         finally:
             os._exit(2)  # 2 == HUMAN_REQUIRED exit code; skip further teardown
 

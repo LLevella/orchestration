@@ -8,13 +8,22 @@ Layout per run:
         iterations/NN-*.md full prompt + full output for each step (never overwritten)
         artifacts/         drafts, diffs, AQ docs produced during the run
         disagreements.md   accumulated unresolved-issue dossier
+        quality.json       derived quality signal (architecture runs, schema_version 1);
+                           staged during the run, published only by a normal finish
         STATUS             one-glance terminal status + reason
 """
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
+
+# `quality.json` is published in two phases (see `write_quality` / `finish`): the
+# derived summary lands in the pending path first and is renamed into place only
+# when the run finalizes normally.
+QUALITY_FILE = "quality.json"
+QUALITY_PENDING = ".quality.json.pending"
 
 
 def now_utc() -> str:
@@ -283,6 +292,47 @@ class Transcript:
         (self.dir / "disagreements.md").write_text(content, encoding="utf-8")
         self.event(kind="disagreements", chars=len(content))
 
+    def write_quality(self, summary: dict) -> None:
+        """Stage the run's derived quality signal for publication as `quality.json`.
+
+        Deterministic formatting (sorted keys, fixed indent) so two runs of the same
+        cohort differ only where their measurements differ. This is a DERIVED artifact:
+        every number in it comes from gate and author responses already in this run's
+        journal, so it adds no agent call and no new telemetry source.
+
+        Staged, not published, and deliberately so. The engine derives the metric
+        BEFORE `finish()`, because the journal this event goes to is still open here —
+        which leaves a window in which a signal can arrive with the summary already on
+        disk. So the bytes land in the pending path, and only `finish()` renames them
+        into place, atomically, and only for a run that finalized normally: the signal
+        handler in orchestrate.py reaches `finish(interrupted=True)` and discards them
+        instead. A run interrupted anywhere in that window therefore has NO
+        `quality.json` at all, which is how incomplete evidence stays out of comparison
+        cohorts rather than contributing a partial value."""
+        (self.dir / QUALITY_PENDING).write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        overall = summary.get("overall") or {}
+        self.event(kind="quality", metric=summary.get("metric"),
+                   schema_version=summary.get("schema_version"),
+                   accepted=overall.get("accepted"), eligible=overall.get("eligible"),
+                   rate=overall.get("rate"))
+
+    def _publish_quality(self, interrupted: bool) -> None:
+        """Resolve a staged quality signal: publish it, or drop it.
+
+        Last act of a normal `finish()`, so `quality.json` existing implies the run
+        also has its STATUS — and `os.replace` is atomic, so a reader never sees a
+        half-written one. An interrupted finalization deletes the staging file, and a
+        finalization that is itself cut short simply never gets here: the pending path
+        is hidden and no cohort rule looks at it."""
+        pending = self.dir / QUALITY_PENDING
+        if not pending.exists():
+            return
+        if interrupted:
+            pending.unlink()
+        else:
+            os.replace(pending, self.dir / QUALITY_FILE)
+
     # usage.json shape version. v1 recorded one row per logical step, summed only
     # `input`/`output`/`total`, and reported an unpriced transport as $0.00. v2 sums
     # ATTEMPTS, carries every input class, and states coverage so "nobody reported a
@@ -379,7 +429,12 @@ class Transcript:
         self.md("\n".join(lines) + "\n")
         return totals
 
-    def finish(self, status: str, reason: str):
+    def finish(self, status: str, reason: str, interrupted: bool = False):
+        """Finalize the run. `interrupted=True` marks a finalization forced by a signal
+        rather than by the engine reaching a terminal state; it publishes no staged
+        quality signal (see `_publish_quality`). A second call is a no-op that touches
+        nothing — a signal landing mid-finish must not undo a publication that already
+        happened, nor publish one the engine never resolved."""
         if getattr(self, "_finished", False):
             return self.meta.get("status")
         self._finished = True
@@ -404,4 +459,5 @@ class Transcript:
         self.event(kind="status", status=status, reason=reason, usage_total=totals)
         self.md(f"\n---\n\n## FINAL STATUS: **{status}**\n\n{reason}\n")
         self._events.close()
+        self._publish_quality(interrupted)
         return status

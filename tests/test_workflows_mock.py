@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 
 from orchestrator.config import load_config, project_base
+from orchestrator.transcript import QUALITY_PENDING
 
 ORCH = Path(__file__).resolve().parent.parent          # the tool directory
 # Run history is not necessarily inside the tool: a project layer can point runs_dir
@@ -51,11 +52,34 @@ def _step_counts(run_dir):
     return " ".join(f"{k}={v}" for k, v in sorted(counts.items()))
 
 
-def _run(workflow, scenario, extra=None):
+def _derived(run_dir):
+    """The run's DERIVED evidence, appended to the captured output so a test can assert
+    on it after the run directory is removed: `quality.json`, the proposal artifacts, and
+    the raw author step (the one place the author's disposition block is allowed to
+    survive)."""
+    out = ""
+    q = run_dir / "quality.json"
+    if q.exists():
+        out += "\n[QUALITY FILE]\n" + q.read_text(encoding="utf-8").strip() + "\n"
+    # The staging path quality.json is published FROM. A normally finished run must
+    # leave none behind: one surviving here would mean the rename never happened and
+    # the run's own measurement stayed invisible to the cohorts.
+    out += "\n[QUALITY PENDING] " + str((run_dir / QUALITY_PENDING).exists()) + "\n"
+    out += "\n[ARTIFACTS]\n" + "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted((run_dir / "artifacts").glob("*.md"))
+    ) + "\n"
+    out += "\n[RAW AUTHOR]\n" + "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((run_dir / "iterations").glob("*arch-author*.md"))) + "\n"
+    return out
+
+
+def _run(workflow, scenario, extra=None, keep=False):
     """Run one mock workflow; return (returncode, final_status, output). The run's
     STATUS file (status + reason) and its per-step counts are appended to `output`
     before the run dir is removed, so tests can assert on the reason (e.g. which
-    iteration converged) and on the route actually taken."""
+    iteration converged) and on the route actually taken. `keep=True` additionally
+    appends the run's derived evidence (see `_derived`)."""
     cmd = [sys.executable, "orchestrate.py", CMD[workflow], "--mock",
            "--scenario", scenario, "--task", "unit-test"]
     if extra:
@@ -68,6 +92,8 @@ def _run(workflow, scenario, extra=None):
         if sf.exists():
             out += "\n[STATUS FILE]\n" + sf.read_text(encoding="utf-8")
         out += "\n[STEP COUNTS] " + _step_counts(RUNS / m.group(1)) + "\n"
+        if keep:
+            out += _derived(RUNS / m.group(1))
         shutil.rmtree(RUNS / m.group(1), ignore_errors=True)
     ms = re.search(r"FINAL STATUS: (\S+)", out)
     return p.returncode, (ms.group(1) if ms else None), out
@@ -97,11 +123,47 @@ class TestWorkflowsMock(unittest.TestCase):
                          {"arch.author": 1, "arch.dev_review": 1, "arch.tech_lead": 1},
                          out[-600:])
 
-    def test_arch_techlead_rework_makes_no_semantic_call(self):
-        # The Developer returns FEASIBLE on every draft, so no repeat is ever eligible:
-        # a Tech-Lead rejection alone must not start paying for audits.
-        _rc, _status, out = _run("architecture", "techlead_rework")
-        self.assertNotIn("arch.semantic_repeat", out.split("[STEP COUNTS]", 1)[1])
+    def test_arch_techlead_rework_assesses_the_gate_departure_once(self):
+        # The Developer returns FEASIBLE on every draft, so no REPEAT audit is ever
+        # eligible — but the Tech-Lead rejection overturns a FEASIBLE result, so it IS
+        # assessed for gate departure, exactly once, and the assessment finds it
+        # justified. Counted, not inferred: an exhausted mock queue repeats its last
+        # response, so only the step counts prove which route ran.
+        _rc, status, out = _run("architecture", "techlead_rework")
+        self.assertEqual(status, "PASS", out[-600:])
+        self.assertEqual(_counts(out),
+                         {"arch.author": 2, "arch.dev_review": 2, "arch.tech_lead": 2,
+                          "arch.semantic_gate_departure": 1}, out[-600:])
+        counts = out.split("[STEP COUNTS]", 1)[1]
+        self.assertNotIn("arch.semantic_repeat=", counts)
+        self.assertNotIn("arch.tech_lead_reconsider", counts)
+
+    def test_arch_techlead_rework_measures_the_accepted_blocker(self):
+        # The whole quality signal of this run: the Tech Lead's TL-1-B1 reached the
+        # author as an active finding, and draft 2 said it applied it. The dispositions
+        # live in the raw author step only — never in the proposal artifacts.
+        rc, _status, out = _run("architecture", "techlead_rework", keep=True)
+        self.assertEqual(rc, 0)
+        quality = json.loads(out.split("[QUALITY FILE]\n", 1)[1].split("\n[", 1)[0])
+        self.assertEqual(quality["schema_version"], 1)
+        self.assertEqual(quality["overall"], {"accepted": 1, "eligible": 1, "rate": 1.0,
+                                              "disagreed": 0, "unclassified": 0})
+        self.assertEqual(quality["by_source_gate"]["TL"]["accepted"], 1)
+        self.assertEqual(quality["findings"][0]["finding_id"], "TL-1-B1")
+        # Published by the normal finish, not merely staged by the derivation.
+        self.assertIn("[QUALITY PENDING] False", out)
+        artifacts = out.split("[ARTIFACTS]\n", 1)[1].split("\n[RAW AUTHOR]", 1)[0]
+        self.assertNotIn("Blocker Dispositions", artifacts)
+        self.assertIn("Blocker Dispositions", out.split("[RAW AUTHOR]\n", 1)[1])
+
+    def test_arch_pass_writes_a_null_rate_rather_than_zero(self):
+        # A first-pass successful run has no eligible finding at all. `rate: null` is the
+        # honest answer; 0.0 would read as "the author accepted nothing".
+        _rc, _status, out = _run("architecture", "pass", keep=True)
+        quality = json.loads(out.split("[QUALITY FILE]\n", 1)[1].split("\n[", 1)[0])
+        self.assertEqual(quality["overall"]["eligible"], 0)
+        self.assertIsNone(quality["overall"]["rate"])
+        self.assertEqual(quality["findings"], [])
 
     def test_arch_escalate_pauses_for_human(self):
         # Developer NEEDS_REVISION 5x -> Arbiter -> NEEDS_HUMAN_DECISION -> run PAUSES
@@ -185,6 +247,20 @@ class TestWorkflowsMock(unittest.TestCase):
         rc, status, out = _run("development", "pass")
         self.assertEqual(status, "READY_FOR_HUMAN_REVIEW", out[-600:])
         self.assertEqual(rc, 0)
+
+    def test_development_fixtures_keep_their_vocabularies_and_routes(self):
+        # ARCH-02 is architecture-only. The development Tech-Lead and Arbiter steps keep
+        # their own verdicts and their own routes: no semantic audit, no reconsideration,
+        # and no quality artifact anywhere in the workflow.
+        for scenario in _scenarios("development"):
+            with self.subTest(scenario=scenario):
+                _rc, status, out = _run("development", scenario, keep=True)
+                self.assertIsNotNone(status)
+                counts = out.split("[STEP COUNTS]", 1)[1]
+                for step in ("semantic_repeat", "semantic_gate_departure",
+                             "tech_lead_reconsider"):
+                    self.assertNotIn(step, counts)
+                self.assertNotIn("[QUALITY FILE]", out)
 
     def test_review_pass(self):
         # Panel (3 lenses) + Review Arbiter NEEDS_REVISION -> REVIEW_COMPLETE (success).

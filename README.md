@@ -204,6 +204,114 @@ Properties worth knowing, because they are deliberate:
 A workflow with no `semantic_audit` block has audits disabled and raises no
 configuration error.
 
+#### The gate's departure from the reviewer
+
+The Tech Lead runs **only** on drafts the Developer Verifier already passed, and
+overturning that result costs the author another full iteration. One corpus run
+overturned `FEASIBLE` in 33 seconds by re-labelling two of the reviewer's own
+advisory notes as blockers. The role prompt forbids that; nothing checked it.
+
+So when the Tech Lead returns `DEVELOPER_NEEDS_FIX`,
+`ARCHITECT_REVIEW_NEEDS_REVISION` or `ESCALATE_TO_HUMAN` on a `FEASIBLE`
+proposal, the same arbiter seat is asked one question in its second mode
+(`[[ARCH_SEMANTIC_AUDIT_V1:GATE_DEPARTURE]]`, step
+`arch.semantic_gate_departure`): does each Tech-Lead finding carry the evidence
+a departure requires — a named false checklist item or a concrete missed risk,
+with the proposal text quoted and the failure mechanism stated?
+
+The assessment happens **before** the result touches `tl_rejects`, and the
+Tech Lead projects its blockers into a canonical `## Architecture Blocking
+Findings` manifest (`TL-<iteration>-B<n>`) so the answer is about named
+evidence. An unstructured non-approval collapses to one indivisible
+`TL-<iteration>-B0` holding the whole report — which is also why a partial
+ruling is structurally unavailable against it.
+
+| Ruling | `tl_rejects` | What happens |
+|---|---|---|
+| `JUSTIFIED_GATE_DEPARTURE` | +1 | all findings go to the author as the active manifest (or, at the threshold / on an original `ESCALATE_TO_HUMAN`, to the full arbiter) |
+| `PARTIALLY_JUSTIFIED_GATE_DEPARTURE` | +1 | only the **retained** findings go to the author, with the arbiter's correction as the binding instruction |
+| `UNJUSTIFIED_GATE_DEPARTURE` | unchanged | every finding becomes historical, **no author iteration is spent**, and the Tech Lead reconsiders the *unchanged* draft once (`arch.tech_lead_reconsider`). Only its `READY_FOR_HUMAN_REVIEW` closes the run; anything else goes to the full arbiter |
+| `NEEDS_HUMAN_DECISION`, `SELF_CONTRADICTION` | unchanged | the existing full `arch.arbiter`, with the semantic evidence in the history |
+| `INSUFFICIENT_INFORMATION`, unparseable after repair, allowance exhausted | +1 (the original route) | the **original** Tech-Lead verdict is applied exactly as before |
+
+Two properties are worth stating explicitly:
+
+- **An approving gate costs nothing.** `Author → FEASIBLE → READY_FOR_HUMAN_REVIEW`
+  makes no semantic call at all, and the two allowances (`max_calls_per_mode`,
+  3 each) are independent per mode per run directory.
+- **A rejected finding is set aside, not deleted.** The full Tech-Lead report and
+  the assessment stay in `disagreements.md`; the author receives only the active
+  findings, and a later full arbiter receives the complete history **plus** a
+  separate active-finding list so nothing rejected is silently reinstated.
+
+#### The one quality signal: `author_blocker_acceptance_rate`
+
+Every run records duration, tokens and cost — so no roster, limit or prompt change
+could be *shown* to have helped. One metric now measures the loop itself, written
+to `runs/<run-id>/quality.json` (`schema_version: 1`):
+
+```text
+author_blocker_acceptance_rate = accepted eligible blocking findings
+                               / all eligible blocking findings
+```
+
+A finding is **eligible** when a control gate (Developer Verifier or the original
+Tech Lead) raised it, it was in the one-shot `## Active Gate Findings` manifest
+handed to the *immediately following* author, and that author returned a proposal.
+The author reports what it did in a trailing transport block:
+
+```md
+## Blocker Dispositions
+- DV-3-B1 | ACCEPTED | Components & Boundaries
+- DV-3-B2 | DISAGREED | Disagreements
+```
+
+The engine parses that block and **strips it** before `draft` exists — so it
+survives only in the raw `arch.author` step of the journal, and never reaches
+`architecture-draft-NN.md`, `architecture-final.md`, or any later author,
+verifier, Tech-Lead, arbiter or human prompt. Classification is deterministic:
+`ACCEPTED` requires the named H2 section to exist in the clean proposal and not be
+`Disagreements`; `DISAGREED` requires a `## Disagreements` section; partial
+acceptance is `DISAGREED`, because the metric has no fractional score.
+
+**How to read it, and how not to:**
+- It measures **explicit author disposition, not technical correctness.** Judging
+  whether the resulting proposal is right stays the job of the Developer Verifier
+  and the Tech Lead. A high rate is not a quality score, and a low one is not
+  proof the gates were wrong.
+- **A defect is counted, never guessed.** A missing, duplicate, unknown or
+  invalid disposition becomes `UNCLASSIFIED` — inside the denominator, outside the
+  numerator. It is never repaired with another author call and **never changes a
+  route**: a measurement must not alter the thing it measures.
+- **Nothing is fabricated.** A finding with no later author opportunity is
+  `pending` and excluded from both halves; findings superseded by a full-arbiter or
+  human ruling, and findings a gate-departure assessment rejected, are excluded
+  *with the reason recorded*. A first-pass successful run writes `rate: null`, not
+  `0.0`. A signal-interrupted run has **no** `quality.json` at all: the file is
+  staged while the run finishes and renamed into place as the last act of a normal
+  finalization, so a signal arriving at any point before that — the handler
+  finalizes the transcript itself — discards it instead of publishing it.
+- Per-source-gate counts are reported alongside the overall ones and sum to them.
+
+**The baseline limitation, stated plainly:** the 200-run corpus in
+`orchestration-project/runs/` has neither stable blocker IDs nor author
+dispositions, so **there is no pre-change value for this metric and no backfill is
+proposed**. The first valid comparison needs **two post-implementation cohorts**.
+
+**Cohort-comparison rules** (deliberately arithmetic — no causal threshold, no
+composite score, no significance test):
+- Include only runs with `quality.json` `schema_version: 1` **and** a non-zero
+  aggregate eligible denominator.
+- Aggregate `accepted` and `eligible` counts — never average per-run percentages.
+- Report each cohort's run count *and* its eligible-finding denominator.
+- Use the same task set, or an explicitly matched task mix.
+- Compare rosters using the recorded resolved assignments and source-gate agents;
+  compare prompt versions using clean `run.json.versions.tool.commit` values, and
+  keep dirty or unknown versions in their own group.
+- **Exclude every member of a resume chain** (a resume re-journals prior steps;
+  `quality.json` names its parent in `resumed_from`), and exclude
+  signal-interrupted runs that have no `quality.json`.
+
 ### Development (`dev`)
 Claude implements (the only step allowed to edit code) → Codex reviews the diff
 as Code Reviewer and as Architect every iteration. **Gemini (Tech Lead) is the
@@ -325,7 +433,8 @@ Properties worth knowing, because they are deliberate:
 └─ runs/<run-id>/            default run history (gitignored), unless paths.runs_dir
                              moves it out: run.json, events.jsonl, transcript.md,
                              iterations/, artifacts/, disagreements.md, STATUS,
-                             usage.json (token/cost accounting, schema_version 2)
+                             usage.json (token/cost accounting, schema_version 2),
+                             quality.json (architecture runs only, schema_version 1)
 
 <project>/                     NOT reusable — lives with the project, never in the tool
 ├─ project.json              paths, guard, and where the context files are

@@ -177,6 +177,46 @@ implementability. To raise it to a blocker you must supply new evidence of the k
 quoted line and the failure it produces. Without that, it stays advisory: pass it on as a note in
 `### For Architect`, and approve.
 
+That rule is now **checked**. A non-approval of a `FEASIBLE` proposal is read by an independent
+arbiter, which compares your findings against the Verifier's report and the evidence you cited.
+A finding it rejects becomes historical evidence and stops being a blocker; if it rejects all of
+them, you are asked to reconsider the same unchanged draft with its correction. So cite the
+evidence — it is the difference between a finding that stands and one that is set aside.
+
+### The canonical blocking manifest (architecture workflow, non-approval only)
+
+When you do not approve an architecture proposal, append **one more section** to your output, as
+the machine-readable projection of the blockers you justified above:
+
+```md
+## Architecture Blocking Findings
+
+### B1
+Kind: FALSE_VERIFIER_CHECK / MISSED_RISK
+Checklist item: <the Verifier checklist item this falsifies, or NONE>
+Proposal evidence: <the proposal text you quote>
+Failure mechanism: <the concrete consequence>
+Acceptance criterion: <the stated criterion it breaks, or NONE>
+
+### B2
+- (same five lines, for the next independent finding)
+```
+
+Rules for it:
+
+* It is a **projection, not a third opinion**. Every issue your `## Architect Blocking Issues
+  Assessment` or `## Additional Tech Lead Findings` relies on to justify the non-approval appears
+  here **exactly once**, and nothing else does.
+* **Advisory entries are excluded.** Anything you are passing on as a note stays a note.
+* One heading per independent finding, numbered from `### B1` in order; never merge two findings
+  under one heading, and never reuse a number. A report without these headings is treated as one
+  single indivisible finding.
+* A blocking claim you leave out of the manifest is **inactive** and cannot support your decision.
+* On `READY_FOR_HUMAN_REVIEW` the section is just `NONE`.
+
+This section is architecture-workflow only. Your development-workflow output and your verdict
+vocabulary are unchanged.
+
 ## Step 4: Team and Delivery Reality
 
 Evaluate:
@@ -266,6 +306,9 @@ For each Architect blocker:
 
 ## Additional Tech Lead Findings
 - ...
+
+## Architecture Blocking Findings
+<architecture workflow only: the canonical projection above on a non-approval, or NONE>
 
 ## ADR Decision
 Required / Not Required / Needs Human Decision
