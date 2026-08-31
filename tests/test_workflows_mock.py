@@ -5,30 +5,68 @@ chain, the investigation loop) via scripted fixtures — no AI creds, no network
 the final terminal status + exit code (0 success / 2 HUMAN_REQUIRED). Copy-agnostic:
 mock adapters ignore the arbiter model, so this passes for both DeepSeek and Mistral copies.
 
-Each run is cleaned up (its runs/<id>/ dir is removed).
+The suite owns its own run history: every run below is created inside a private,
+temporary project layer and disappears with it (see _private_project_layer).
 """
+import contextlib
 import json
+import os
 import re
-import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
-from orchestrator.config import load_config, project_base
+from orchestrator.config import PROJECT_ENV, PROJECT_FILE
 from orchestrator.transcript import QUALITY_PENDING
 
 ORCH = Path(__file__).resolve().parent.parent          # the tool directory
-# Run history is not necessarily inside the tool: a project layer can point runs_dir
-# somewhere else, and then that is where these runs must be found and cleaned up.
-_AGENTS, _WF = load_config()
-RUNS = ((project_base(_WF) / _WF["paths"]["runs_dir"]).resolve()
-        if _WF["paths"].get("runs_dir") else ORCH / "runs")
+# The project layer these tests run against. It is deliberately synthetic and empty:
+# a mock run needs no repository, and the point of building one here is that the run
+# history lands in `runs_dir` INSIDE the temporary directory below and nowhere else.
+# Written literally rather than copied from config/project.example.json, so what the
+# suite runs against cannot drift with the shipped template.
+_TEST_PROJECT = {
+    "_comment": "Synthetic project layer built by tests/test_workflows_mock.py. Not a "
+                "template: it exists so mock runs write their history into a private "
+                "temporary directory instead of a real project's run corpus.",
+    "paths": {"repo_root": ".", "dev_repos": [], "analysis_repos": [],
+              "docs_architecture": "docs/architecture", "runs_dir": "runs"},
+    "guard": {"enabled": True, "exclude_prefix": "orchestration"},
+    "context_file": None,
+    "role_context": {},
+}
 SUCCESS = {"PASS", "READY_FOR_HUMAN_REVIEW", "ROOT_CAUSE_ESTABLISHED", "NO_DEFECT_FOUND",
            "REVIEW_COMPLETE", "IMPLREVIEW_COMPLETE"}
 # fixtures dirs use full workflow names; the CLI subcommand is the short form.
 CMD = {"architecture": "arch", "development": "dev", "investigation": "inv", "review": "review",
        "implreview": "implreview", "mrreview": "mrreview"}
+
+
+@contextlib.contextmanager
+def _private_project_layer():
+    """Yield (env, runs_dir) for a throwaway project layer in a temporary directory.
+
+    WHY (2026-08-31): these tests spawn the real CLI, so the run history they create is
+    written by that subprocess into whatever `paths.runs_dir` the ACTIVE project layer
+    names — with an operator's layer in force, that is the project's real run corpus.
+    Dozens of test runs were created and deleted inside it on every `./run-tests.sh`,
+    interrupted runs left mock leftovers there, and "the most recent run" stopped
+    meaning anything. The suite therefore builds its OWN layer and points the
+    subprocess at it via $ORCH_PROJECT (which overrides both an inherited value and
+    config/project.json), so the outcome no longer depends on the tree the suite was
+    launched from. The layer is real, not faked: the tests still read STATUS, step
+    counts and artifacts out of the run directory — it is simply private.
+
+    The TemporaryDirectory is used as a context manager on purpose: a failing
+    assertion, an exception or a timeout inside the block still takes the run
+    directory with it, which a cleanup line at the end of the helper would not.
+    """
+    with tempfile.TemporaryDirectory(prefix="orch-test-project-") as tmp:
+        layer = Path(tmp) / PROJECT_FILE
+        layer.write_text(json.dumps(_TEST_PROJECT, indent=2), encoding="utf-8")
+        yield {**os.environ, PROJECT_ENV: str(layer)}, Path(tmp) / "runs"
 
 
 def _step_counts(run_dir):
@@ -77,24 +115,26 @@ def _derived(run_dir):
 def _run(workflow, scenario, extra=None, keep=False):
     """Run one mock workflow; return (returncode, final_status, output). The run's
     STATUS file (status + reason) and its per-step counts are appended to `output`
-    before the run dir is removed, so tests can assert on the reason (e.g. which
-    iteration converged) and on the route actually taken. `keep=True` additionally
-    appends the run's derived evidence (see `_derived`)."""
+    before the private run history is destroyed, so tests can assert on the reason
+    (e.g. which iteration converged) and on the route actually taken. `keep=True`
+    additionally appends the run's derived evidence (see `_derived`)."""
     cmd = [sys.executable, "orchestrate.py", CMD[workflow], "--mock",
            "--scenario", scenario, "--task", "unit-test"]
     if extra:
         cmd += extra
-    p = subprocess.run(cmd, cwd=str(ORCH), capture_output=True, text=True, timeout=180)
-    out = p.stdout + p.stderr
-    m = re.search(r"run (\S+) \(mock=True", out)
-    if m:
-        sf = RUNS / m.group(1) / "STATUS"
-        if sf.exists():
-            out += "\n[STATUS FILE]\n" + sf.read_text(encoding="utf-8")
-        out += "\n[STEP COUNTS] " + _step_counts(RUNS / m.group(1)) + "\n"
-        if keep:
-            out += _derived(RUNS / m.group(1))
-        shutil.rmtree(RUNS / m.group(1), ignore_errors=True)
+    with _private_project_layer() as (env, runs):
+        p = subprocess.run(cmd, cwd=str(ORCH), capture_output=True, text=True, timeout=180,
+                           env=env)
+        out = p.stdout + p.stderr
+        m = re.search(r"run (\S+) \(mock=True", out)
+        if m:
+            run_dir = runs / m.group(1)
+            sf = run_dir / "STATUS"
+            if sf.exists():
+                out += "\n[STATUS FILE]\n" + sf.read_text(encoding="utf-8")
+            out += "\n[STEP COUNTS] " + _step_counts(run_dir) + "\n"
+            if keep:
+                out += _derived(run_dir)
     ms = re.search(r"FINAL STATUS: (\S+)", out)
     return p.returncode, (ms.group(1) if ms else None), out
 
@@ -350,6 +390,49 @@ class TestWorkflowsMock(unittest.TestCase):
                 self.assertEqual(rc == 0, status in SUCCESS, f"{wf}/{sc}: rc/status mismatch ({rc},{status})")
                 ran += 1
         self.assertGreaterEqual(ran, 6, "expected several shipped scenarios")
+
+
+class TestRunHistoryIsolation(unittest.TestCase):
+    """DEV-10: the suite's runs land in the suite's own history, and nowhere else.
+
+    The defect these pin: the runs above were resolved from the project layer in
+    force, so `./run-tests.sh` wrote — and then deleted — dozens of run directories
+    inside the operator's real run corpus, and every interrupted suite left mock runs
+    behind in it. Nothing here touches a real project layer: that is the property.
+    """
+
+    def test_a_mock_run_writes_only_inside_the_private_layer(self):
+        with _private_project_layer() as (env, runs):
+            p = subprocess.run(
+                [sys.executable, "orchestrate.py", "dev", "--mock", "--scenario", "pass",
+                 "--task", "unit-test"],
+                cwd=str(ORCH), capture_output=True, text=True, timeout=180, env=env)
+            out = p.stdout + p.stderr
+            self.assertEqual(p.returncode, 0, out[-600:])
+            history = re.search(r"history: (\S+)", out)
+            self.assertIsNotNone(history, out[-600:])
+            written = Path(history.group(1)).resolve()
+            # The CLI resolved its run history from OUR layer, not from the active one.
+            self.assertEqual(written.parent, runs.resolve(), out[-600:])
+            # ... and it is the only run there, so no real history was consulted either.
+            self.assertEqual([d.name for d in runs.iterdir()], [written.name])
+        self.assertFalse(runs.exists(), "the private run history outlived its test")
+
+    def test_a_failure_inside_a_run_still_removes_the_run_directory(self):
+        """The cleanup cannot be skipped — demonstrated, not asserted about the code.
+
+        A test that fails before reaching any cleanup line is exactly how the
+        leftovers in a real runs_dir were produced, so the mechanism is pinned with a
+        failure raised INSIDE the block.
+        """
+        escaped = None
+        with self.assertRaises(AssertionError):
+            with _private_project_layer() as (_env, runs):
+                escaped = runs
+                (runs / "20260831T000000Z-development-dead").mkdir(parents=True)
+                self.fail("simulated assertion failure while a run exists")
+        self.assertIsNotNone(escaped)
+        self.assertFalse(escaped.exists(), "a failing test left a run directory behind")
 
 
 if __name__ == "__main__":
