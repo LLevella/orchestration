@@ -7,6 +7,7 @@ mock adapters ignore the arbiter model, so this passes for both DeepSeek and Mis
 
 Each run is cleaned up (its runs/<id>/ dir is removed).
 """
+import json
 import re
 import shutil
 import subprocess
@@ -29,10 +30,32 @@ CMD = {"architecture": "arch", "development": "dev", "investigation": "inv", "re
        "implreview": "implreview", "mrreview": "mrreview"}
 
 
+def _step_counts(run_dir):
+    """`step=N` per logical step id, from the run's own journal.
+
+    Terminal status alone is too weak an assertion for a scripted fixture: a queue that
+    runs dry silently repeats its last response, so a fixture can keep "passing" while
+    taking a completely different route through the engine. Counting the steps pins the
+    route — and, for ARCH-02, pins that the ordinary path pays for no audit."""
+    ev = run_dir / "events.jsonl"
+    counts = {}
+    if not ev.exists():
+        return ""
+    for line in ev.read_text(encoding="utf-8").splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("kind") == "step":
+            counts[e["step"]] = counts.get(e["step"], 0) + 1
+    return " ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+
+
 def _run(workflow, scenario, extra=None):
     """Run one mock workflow; return (returncode, final_status, output). The run's
-    STATUS file (status + reason) is appended to `output` before the run dir is
-    removed, so tests can assert on the reason (e.g. which iteration converged)."""
+    STATUS file (status + reason) and its per-step counts are appended to `output`
+    before the run dir is removed, so tests can assert on the reason (e.g. which
+    iteration converged) and on the route actually taken."""
     cmd = [sys.executable, "orchestrate.py", CMD[workflow], "--mock",
            "--scenario", scenario, "--task", "unit-test"]
     if extra:
@@ -44,9 +67,15 @@ def _run(workflow, scenario, extra=None):
         sf = RUNS / m.group(1) / "STATUS"
         if sf.exists():
             out += "\n[STATUS FILE]\n" + sf.read_text(encoding="utf-8")
+        out += "\n[STEP COUNTS] " + _step_counts(RUNS / m.group(1)) + "\n"
         shutil.rmtree(RUNS / m.group(1), ignore_errors=True)
     ms = re.search(r"FINAL STATUS: (\S+)", out)
     return p.returncode, (ms.group(1) if ms else None), out
+
+
+def _counts(out):
+    line = out.split("[STEP COUNTS] ", 1)[1].splitlines()[0] if "[STEP COUNTS] " in out else ""
+    return dict((k, int(v)) for k, v in (kv.split("=") for kv in line.split() if "=" in kv))
 
 
 def _scenarios(workflow):
@@ -59,6 +88,21 @@ class TestWorkflowsMock(unittest.TestCase):
         self.assertEqual(status, "PASS", out[-600:])
         self.assertEqual(rc, 0)
 
+    def test_arch_happy_path_makes_no_semantic_call(self):
+        # ARCH-02's central cost promise: a run where no repeat occurs pays for zero
+        # additional agent calls. This fixture IS that promise.
+        _rc, status, out = _run("architecture", "pass")
+        self.assertEqual(status, "PASS", out[-600:])
+        self.assertEqual(_counts(out),
+                         {"arch.author": 1, "arch.dev_review": 1, "arch.tech_lead": 1},
+                         out[-600:])
+
+    def test_arch_techlead_rework_makes_no_semantic_call(self):
+        # The Developer returns FEASIBLE on every draft, so no repeat is ever eligible:
+        # a Tech-Lead rejection alone must not start paying for audits.
+        _rc, _status, out = _run("architecture", "techlead_rework")
+        self.assertNotIn("arch.semantic_repeat", out.split("[STEP COUNTS]", 1)[1])
+
     def test_arch_escalate_pauses_for_human(self):
         # Developer NEEDS_REVISION 5x -> Arbiter -> NEEDS_HUMAN_DECISION -> run PAUSES
         # (AWAITING_HUMAN) for a resumable human decision.
@@ -67,11 +111,25 @@ class TestWorkflowsMock(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("Arbiter", out, out[-600:])
 
+    def test_arch_escalate_reaches_the_arbiter_through_the_semantic_route(self):
+        # ARCH-02 (2026-08-31): the byte-identical objection is ruled a repeat at streak
+        # 2 (one compliance revision) and again at streak 3, so full arbitration happens
+        # at streak 3 instead of streak 5. The terminal status is unchanged; the route
+        # and its cost are not. Counted, not inferred: an exhausted mock queue repeats
+        # its last response, so only the step counts prove which route ran.
+        _rc, _status, out = _run("architecture", "escalate")
+        self.assertEqual(_counts(out),
+                         {"arch.author": 3, "arch.dev_review": 3,
+                          "arch.semantic_repeat": 2, "arch.arbiter": 1}, out[-600:])
+
     def test_arch_human_decide_pauses_without_answer(self):
         # No --human-answer: the arbiter's NEEDS_HUMAN_DECISION pauses the run.
         rc, status, out = _run("architecture", "human_decide")
         self.assertEqual(status, "AWAITING_HUMAN", out[-600:])
         self.assertEqual(rc, 2)
+        self.assertEqual(_counts(out),
+                         {"arch.author": 3, "arch.dev_review": 3,
+                          "arch.semantic_repeat": 2, "arch.arbiter": 1}, out[-600:])
 
     def test_arch_human_answer_resumes_to_pass(self):
         # With --human-answer the arbiter's deferral is filled by the human ruling, the
@@ -80,6 +138,10 @@ class TestWorkflowsMock(unittest.TestCase):
                                extra=["--human-answer", "Bound the buffer to a fixed 4-entry budget."])
         self.assertEqual(status, "PASS", out[-600:])
         self.assertEqual(rc, 0)
+        self.assertIn("iteration 4", out, out[-600:])
+        self.assertEqual(_counts(out),
+                         {"arch.author": 4, "arch.dev_review": 4, "arch.tech_lead": 1,
+                          "arch.semantic_repeat": 2, "arch.arbiter": 1}, out[-600:])
 
     def test_arch_human_answer_survives_the_arbiters_own_rulings(self):
         # Regression (2026-08-26): the dispute runs to the iteration budget and the arbiter
@@ -92,6 +154,13 @@ class TestWorkflowsMock(unittest.TestCase):
         self.assertEqual(status, "PASS", out[-600:])
         self.assertEqual(rc, 0)
         self.assertIn("iteration 11", out, out[-600:])   # spent past max_iterations=10
+        # ARCH-02: the first streak materially progresses, so its three eligible audits
+        # (streaks 2-4) change no route and exhaust max_calls_per_mode=3. The second
+        # streak is therefore not audited at all and the TWO mid-loop arbiter rulings
+        # this fixture exists to pin still happen, at streaks 5 and 10.
+        self.assertEqual(_counts(out),
+                         {"arch.author": 11, "arch.dev_review": 11, "arch.tech_lead": 1,
+                          "arch.semantic_repeat": 3, "arch.arbiter": 2}, out[-600:])
 
     def test_arch_human_at_budget_pauses_without_answer(self):
         # The same dispute without an answer still stops at the cap: the extra allowance is
@@ -99,6 +168,10 @@ class TestWorkflowsMock(unittest.TestCase):
         rc, status, out = _run("architecture", "human_at_budget")
         self.assertEqual(status, "AWAITING_HUMAN", out[-600:])
         self.assertEqual(rc, 2)
+        # The third, tail arbitration happens ONLY in the no-answer case.
+        self.assertEqual(_counts(out),
+                         {"arch.author": 10, "arch.dev_review": 10,
+                          "arch.semantic_repeat": 3, "arch.arbiter": 3}, out[-600:])
 
     def test_arch_techlead_reject_loops_then_passes(self):
         # Developer FEASIBLE but Tech-Lead rejects once -> back to Architect<->Developer

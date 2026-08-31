@@ -1,6 +1,6 @@
 {
   "name": "pass",
-  "_comment": "Happy path: Codex (Architect) drafts; the Claude Developer review (arch.dev_review) returns FEASIBLE -> the Tech-Lead CONTROL gate (arch.tech_lead) returns READY_FOR_HUMAN_REVIEW -> PASS. Arbiter not invoked (no deadlock).",
+  "_comment": "Happy path: Codex (Architect) drafts; the Claude Developer review (arch.dev_review) returns FEASIBLE -> the Tech-Lead CONTROL gate (arch.tech_lead) returns READY_FOR_HUMAN_REVIEW -> PASS. Arbiter not invoked (no deadlock). ARCH-02 (2026-08-31): this is ALSO the zero-audit contract — the Developer returns FEASIBLE on the first draft, so no repeat assessment is eligible and `arch.semantic_repeat` is never called. It carries no scripted response for that step on purpose: if the ordinary path ever started paying for an audit, this fixture would have to be changed to keep passing.",
   "responses": {
     "arch.author": [
       "# Architecture Proposal: Mock Feature (draft 1)\n\n## Context & Task\nMock authoring step.\n\n## Proposed Design\nA minimal component X with a single boundary, explicit startup error handling, clear interfaces, and a concrete unit-test contract.\n\n## Open Decisions (ADR candidates)\n- None significant.\n"

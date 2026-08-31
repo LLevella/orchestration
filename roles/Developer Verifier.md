@@ -112,6 +112,23 @@ and you previously accepted. A gap you did not consider blocking in iteration 1 
 in iteration 3 unless the changed text created it. If the Architect answered a gap under
 `## Disagreements` and the answer is technically sound, the gap is closed — say so and drop it.
 
+## A Binding Semantic Consistency Ruling (architecture workflow only)
+
+Sometimes the prompt carries a **`## Binding semantic consistency ruling`** block. It means an
+independent arbiter compared your last blocking gaps with the ones you raised earlier in this
+same run and ruled that they are the *same objection, restated*. The draft you are now reading is
+the **one compliance revision** allowed for that objection.
+
+In that review, and only in it:
+
+1. Judge whether this revision **applies the ruling**. Say so explicitly, per gap.
+2. Do **not** re-raise a gap the ruling rejected — unless text that changed *in this draft* gives
+   you new evidence you can quote. Quote it if so.
+3. A gap the ruling upheld and the revision did not close stays a gap; say which part is still open.
+
+Restating a ruled objection in different words does not make it a new one, and it is the fastest
+way to burn the rest of the run's budget on a dispute that has already been settled.
+
 ## Verdict Closure Rule
 The verdict is determined by the Blocking Implementation Gaps list, not by your overall
 impression. If that list is empty, you MUST return `FEASIBLE`. Every gap you list must name a
@@ -140,10 +157,17 @@ FEASIBLE / NEEDS_REVISION / HUMAN_REQUIRED
 - Smaller implementation-safe version exists: No / Yes — <one line, no design>
 
 ## Blocking Implementation Gaps
-For each (empty if FEASIBLE — and an empty list means the verdict is FEASIBLE):
+Empty if FEASIBLE — and an empty list means the verdict is FEASIBLE. Otherwise give EACH
+independent gap its own `### B<n>` heading, numbered from `### B1` in order. One heading per
+gap: never merge two independent gaps under one heading, and never reuse a number.
+
+### B1
 - Quoted line from the proposal:
 - Failure it produces (the decision the implementer must invent, or the cost not budgeted):
 - Question the Architect can close in one revision (NOT how to design it):
+
+### B2
+- (same three lines, for the next independent gap)
 
 ## Notes for Architect
 - ...

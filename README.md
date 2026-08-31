@@ -144,6 +144,66 @@ Ends **PASS** (Gemini PASS / NOT_APPLICABLE) or **HUMAN_REQUIRED**.
 Proposals are written to run history only. Promotion to the repo's
 `docs/architecture/` is a separate, human-approved step (see Q6 decision).
 
+#### Repeated objections: the semantic repeat audit
+
+The escalation counters count consecutive **verdicts**, not repeated **content**.
+An objection restated in different words therefore read as a fresh finding and
+bought another iteration on a dispute that had already happened — 17 of the 64
+architecture runs in the 200-run corpus burned their whole budget that way.
+
+When the Developer Verifier returns `NEEDS_REVISION` for the second consecutive
+time (`semantic_audit.repeat_after_cycles`), the engine asks the **existing
+arbiter cell** one question, in a separate mode selected by an exact first-line
+marker (`[[ARCH_SEMANTIC_AUDIT_V1:REPEAT]]`, step `arch.semantic_repeat`): are
+the current blocking findings the earlier ones restated? Comparison is a
+judgment with a citable ruling, never a string or embedding distance — that was
+the ratified decision, because a paraphrase needs judgment, not a metric.
+
+Each gate report's independent gaps carry stable IDs (`DV-<iteration>-B<n>`,
+from the `### B<n>` headings the role requires); a legacy, malformed or
+duplicate-numbered report collapses to one indivisible synthetic `B0` rather
+than letting Python guess where one objection ends. The findings the next author
+must answer are attached to its prompt as a one-shot `## Active Gate Findings`
+manifest.
+
+The routes are:
+
+| Ruling | What happens |
+|---|---|
+| `DISTINCT_OR_MATERIALLY_PROGRESSING` | the loop continues; `nr_streak` is not reset |
+| first `SAME_OBJECTION_*` | one compliance revision: the binding ruling and the active findings go to the author **and** the Developer Verifier |
+| the same case ruled again, a conflicting side, or `SELF_CONTRADICTION` | the existing full `arch.arbiter` |
+| `NEEDS_HUMAN_DECISION` | the existing full `arch.arbiter`, which owns the resumable `--human-answer` pause |
+| `INSUFFICIENT_INFORMATION`, unparseable after repair, or allowance exhausted | the ordinary author/verifier route, with the current blockers active |
+
+Properties worth knowing, because they are deliberate:
+- **The ordinary path pays nothing.** No repeat, no call: a first-pass `FEASIBLE`
+  followed by Tech-Lead approval makes exactly the calls it always did, which is
+  what `fixtures/architecture/pass.json` pins.
+- **`escalate_after_cycles` keeps precedence.** At the threshold the run goes
+  straight to the full arbiter; an audit is never made for that streak. A
+  semantic ruling never resets `nr_streak`, so the existing threshold stays
+  reachable.
+- **Nothing here can pass a proposal.** An unparseable, insufficient or
+  contradictory result routes onwards; closure still requires Developer-Verifier
+  `FEASIBLE` followed by Tech-Lead `READY_FOR_HUMAN_REVIEW`.
+- **Bounded by design.** At most `max_calls_per_mode` (3) live audits per run,
+  each with at most `repeat_max_prompt_chars` (48 000) characters of dynamic
+  evidence, truncated head-and-tail with a visible `[TRUNCATED]` marker, plus at
+  most two structural repairs. Exhausting the allowance skips the audit; it never
+  pauses or passes the run.
+- **Replay never invents a paid call, and never refunds one.** A gate replayed
+  from the middle of a journal makes no audit; a journaled audit replays for free
+  and is re-parsed under today's contract rather than trusted on its recorded
+  token; a gate that was the last journaled step retries its audit live. The
+  allowance is seeded from the journal being replayed, so `max_calls_per_mode`
+  bounds the whole run directory rather than restarting on every resume.
+- **No budget hints reach a gate.** No prompt tells any gate which iteration it
+  is on or how much budget is left.
+
+A workflow with no `semantic_audit` block has audits disabled and raises no
+configuration error.
+
 ### Development (`dev`)
 Claude implements (the only step allowed to edit code) → Codex reviews the diff
 as Code Reviewer and as Architect every iteration. **Gemini (Tech Lead) is the

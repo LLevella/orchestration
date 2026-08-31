@@ -413,6 +413,38 @@ def _validate_roster(wf, block, agents):
                 "review is worth; the run must be able to say what was traded away.")
 
 
+# Bounds of a `semantic_audit` block. Every key is a positive count or character
+# budget; the block is a BUDGET, never an agent specification (the audit runs in the
+# workflow's existing arbiter cell), so nothing here names or resolves an agent.
+SEMANTIC_AUDIT_KEYS = ("repeat_after_cycles", "prior_objections", "prior_assessments",
+                       "repeat_max_prompt_chars", "gate_max_prompt_chars",
+                       "repair_max_prompt_chars", "max_calls_per_mode")
+
+
+def _validate_semantic_audit(wf, block):
+    """A `semantic_audit` block, if present, must carry positive integer bounds.
+
+    Absent means DISABLED, not invalid: a workflow that predates ARCH-02 (and every
+    hand-built test workflow) must load and run without making a semantic call. A
+    present-but-nonsensical bound is a different thing and is rejected — a zero or
+    negative prompt budget would silently produce empty evidence."""
+    audit = block.get("semantic_audit")
+    if audit is None:
+        return
+    if not isinstance(audit, dict):
+        raise ConfigError(f"workflows.json: {wf}.semantic_audit must be an object "
+                          "(omit it entirely to disable semantic audits)")
+    for key, value in audit.items():
+        if key.startswith("_"):
+            continue
+        if key not in SEMANTIC_AUDIT_KEYS:
+            raise ConfigError(f"workflows.json: {wf}.semantic_audit has unknown key "
+                              f"'{key}' (known: {sorted(SEMANTIC_AUDIT_KEYS)})")
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ConfigError(f"workflows.json: {wf}.semantic_audit.{key} must be a "
+                              f"positive integer, got {value!r}")
+
+
 def _validate(agents, workflows):
     if "agents" not in agents:
         raise ConfigError("agents.json: missing top-level 'agents' object")
@@ -432,6 +464,7 @@ def _validate(agents, workflows):
                 raise ConfigError(
                     f"workflows.json: {wf}.{key} references unknown agent "
                     f"'{spec['agent']}' (known: {sorted(known)})")
+        _validate_semantic_audit(wf, workflows[wf])
         _validate_roster(wf, workflows[wf],
                          {n: c for n, c in agents["agents"].items() if not n.startswith("_")})
 

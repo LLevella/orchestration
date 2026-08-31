@@ -1,13 +1,11 @@
 {
   "name": "human_decide",
-  "_comment": "Architect<->Developer never converges (5x NEEDS_REVISION) -> Arbiter, which returns NEEDS_HUMAN_DECISION. Without --human-answer the run PAUSES (AWAITING_HUMAN). With --human-answer the decision is fed back as a binding ruling; the Developer then returns FEASIBLE and the Tech Lead READY_FOR_HUMAN_REVIEW -> PASS. Exercises escalate_after_cycles=5, the arbiter pause, and the human-answer injection.",
+  "_comment": "The arbiter's human pause, reached through the ARCH-02 semantic route. The Developer Verifier raises the SAME footprint objection three times, each under a `### B1` heading, so the findings get the stable IDs DV-1-B1 / DV-2-B1 / DV-3-B1. Streak 2 triggers arch.semantic_repeat, which rules SAME_OBJECTION_REVIEWER_RIGHT and buys ONE compliance revision; streak 3 rules the same case the same way again, so the existing full arbiter (arch.arbiter) runs and returns NEEDS_HUMAN_DECISION. Without --human-answer the run PAUSES (AWAITING_HUMAN); with it the decision is fed back as a binding ruling, the Developer then returns FEASIBLE and the Tech Lead READY_FOR_HUMAN_REVIEW -> PASS at iteration 4. Exactly two semantic calls and one full-arbiter call. (2026-08-31: this fixture no longer claims to test escalate_after_cycles=5 — that precedence is pinned by tests/test_semantic_repeat.py, which asserts the threshold still outranks the audit.)",
   "responses": {
     "arch.dev_review": [
-      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 1).\n",
-      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 2).\n",
-      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 3).\n",
-      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 4).\n",
-      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n- Buffer footprint unbounded (round 5).\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n\n### B1\n- Quoted line from the proposal: \"A component X whose buffer footprint the Developer says must be bounded.\"\n- Failure it produces: the implementer must invent the footprint budget\n- Question the Architect can close in one revision: what is the maximum footprint, and where is it enforced?\n\n## Notes for Architect\n- Round 1.\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n\n### B1\n- Quoted line from the proposal: \"A component X whose buffer footprint the Developer says must be bounded.\"\n- Failure it produces: the footprint is still unbudgeted, so the implementer must still invent it\n- Question the Architect can close in one revision: what is the maximum footprint, and where is it enforced?\n\n## Notes for Architect\n- Round 2.\n",
+      "## Implementation Feasibility Verdict\nNEEDS_REVISION\n\n## Blocking Implementation Gaps\n\n### B1\n- Quoted line from the proposal: \"A component X whose buffer footprint the Developer says must be bounded.\"\n- Failure it produces: no budget has been stated, so the same invented decision is still required\n- Question the Architect can close in one revision: what is the maximum footprint, and where is it enforced?\n\n## Notes for Architect\n- Round 3.\n",
       "## Implementation Feasibility Verdict\nFEASIBLE\n\n## Blocking Implementation Gaps\n- None; the human ruling bounded the footprint.\n"
     ],
     "arch.arbiter": [
@@ -15,6 +13,10 @@
     ],
     "arch.tech_lead": [
       "## Tech Lead Verdict\nREADY_FOR_HUMAN_REVIEW\n\n## Control Review\n- Sound and proportionate.\n"
+    ],
+    "arch.semantic_repeat": [
+      "## Semantic Consistency Verdict\nSAME_OBJECTION_REVIEWER_RIGHT\n\n## Current Finding IDs\nDV-2-B1\n\n## Matched Prior Finding IDs\nDV-1-B1\n\n## Cited Evidence\nDV-2-B1 and DV-1-B1 demand the same missing decision (the footprint budget) for the same failure mechanism (an unbounded buffer) with the same consequence.\n\n## Binding Ruling\nThe footprint objection stands. The Architect must state the budget and where it is enforced; the Developer Verifier must not restate the objection unless the revised text gives new quotable evidence.\n",
+      "## Semantic Consistency Verdict\nSAME_OBJECTION_REVIEWER_RIGHT\n\n## Current Finding IDs\nDV-3-B1\n\n## Matched Prior Finding IDs\nDV-2-B1\n\n## Cited Evidence\nDV-3-B1 repeats DV-2-B1 after the compliance revision: same decision, same failure mechanism, no narrowing.\n\n## Binding Ruling\nThe ruling is unchanged and the dispute is circular; this case belongs to full arbitration.\n"
     ]
   },
   "default": {
