@@ -108,6 +108,15 @@ UNAVAILABLE_MARKERS = (
     "usage limit", "rate limit", "rate-limit", "ratelimit", "quota",
     "too many requests", "429", "503", "overloaded", "over capacity",
     "high demand", "resource_exhausted", "insufficient_quota",
+    # codex CLI when the OpenAI model itself is saturated: "ERROR: Selected model
+    # is at capacity. Please try a different model." Matched on the VENDOR PHRASE,
+    # not on a bare "at capacity", because this project's own prose says "at
+    # capacity" about work queues and capacity proofs and would false-positive -
+    # the same precision the "payment required" marker below is written with.
+    # Without it the error classified as kind=unknown and HARD-ABORTED the run to
+    # HUMAN_REQUIRED with a live fallback (claude_haiku) sitting unused - observed
+    # twice on 2026-09-12, CT-1B2-q, at ~$13 of re-run developer work each time.
+    "model is at capacity",
     "you've reached", "you have reached", "try again later", "service unavailable",
     # Claude CLI account spending cap (`claude -p` returns is_error with
     # result "Spending cap reached resets Npm"). Account-specific + time-boxed,
@@ -147,6 +156,10 @@ def is_unavailable(text: str) -> bool:
 TRANSIENT_MARKERS = (
     "503", "service unavailable", "overloaded", "over capacity", "high demand",
     "try again later",
+    # Momentary by observation: a small codex probe answered seconds after a large
+    # architect request was refused with this, so one retry of the SAME agent is
+    # worth taking before evicting it for the run.
+    "model is at capacity",
     "fetch failed", "econnreset", "enotfound", "socket hang up",
 )
 
