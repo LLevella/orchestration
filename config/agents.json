@@ -30,8 +30,8 @@
         "Edit Write NotebookEdit MultiEdit"
       ],
       "can_edit": true,
-      "timeout_s": 7200,
-      "_timeout_comment": "Raised 3600 -> 7200 on 2026-09-12: the CT-1B2-f developer step (the deferred container + checked insertion + fatal-boundary atom) ran the full 3600 s and was killed mid-write, leaving ~2800 lines across 7 files in the tree and returning nothing. The bound is an upper limit, not a target - lighter steps are unaffected - and it is the per-step wall-clock that binds on the heaviest atoms, not the thinking budget, which stays where it is.",
+      "timeout_s": 10800,
+      "_timeout_comment": "Raised 7200 -> 10800 on 2026-09-13 for CT-1B2-h, the activation atom: its witness ALONE is about an hour now - a dual build (~12 min), the service-equivalence gate (13 min measured, D75.6) and eighteen further gates - and the developer runs its own witness, so a two-hour bound left under an hour for the implementation. Earlier, raised 3600 -> 7200 on 2026-09-12: the CT-1B2-f developer step (the deferred container + checked insertion + fatal-boundary atom) ran the full 3600 s and was killed mid-write, leaving ~2800 lines across 7 files in the tree and returning nothing. The bound is an upper limit, not a target - lighter steps are unaffected - and it is the per-step wall-clock that binds on the heaviest atoms, not the thinking budget, which stays where it is.",
       "env": {
         "MAX_THINKING_TOKENS": "16000",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
