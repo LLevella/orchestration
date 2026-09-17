@@ -186,6 +186,10 @@ Before final handoff, verify:
 
 ## Output Format
 
+This block must be your **last message** — the orchestrator reads nothing else. Do not run
+anything in the background during the task, and do not end on a reply to a notification or a
+status remark: end here, verdict header first.
+
 Return exactly:
 
 ```md
