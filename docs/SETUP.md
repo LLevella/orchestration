@@ -63,7 +63,10 @@ a different project?** If not, it belongs in the project layer.
                                                  // also the cwd every agent CLI runs in
        "dev_repos":      ["service-a", "sdk"],   // the Developer MAY edit these
        "analysis_repos": ["upstream-x"],         // read-only context, never modified
-       "docs_architecture": "../docs/architecture",
+       "docs_architecture": ["../service-a/doc/architecture"],
+                                                 // one path, or several to scope the
+                                                 // context to the lines of work that
+                                                 // matter; each is searched recursively
        "runs_dir": "runs"                        // optional: keep run history here
                                                  // instead of inside the tool
      },

@@ -507,7 +507,12 @@ class RunContext:
         paths = workflows_cfg["paths"]
         pbase = project_base(workflows_cfg)
         self.repo_root = (pbase / paths["repo_root"]).resolve()
-        self.docs_arch = (pbase / paths.get("docs_architecture", "docs/architecture")).resolve()
+        # One or more directories holding the architecture documents an author should know
+        # exist. A single path stays valid; a LIST scopes the context to the lines of work
+        # that matter rather than to whatever happens to sit at one directory's top level.
+        _docs_arch = paths.get("docs_architecture", "docs/architecture")
+        self.docs_arch = [(pbase / d).resolve()
+                          for d in ([_docs_arch] if isinstance(_docs_arch, str) else _docs_arch)]
         # Base roles ship WITH the tool and are the same for every project. A project may
         # point `roles_dir` at its own set, and then it owns them entirely - but the
         # supported way to add project knowledge is `context_file` / `role_context` below,
@@ -659,19 +664,68 @@ class RunContext:
         return seen
 
     # ---- context inputs ----------------------------------------------
+    # How much of the architecture corpus reaches an author's prompt: every document by
+    # name, and the head of this many of the newest.
+    ARCH_EXCERPTS = 8
+    ARCH_EXCERPT_CHARS = 1500
+    ARCH_INDEX_MAX = 150
+
     def read_existing_arch(self) -> str:
-        if not self.docs_arch.exists():
-            return "(no existing docs/architecture/ directory)"
-        parts = []
-        for f in sorted(self.docs_arch.glob("*.md"))[:8]:
+        """What architecture documents exist, plus the head of the newest few.
+
+        An author is read-only on the repositories but CAN read files, so the useful
+        thing to hand it is an INDEX of what exists — it can then go and read whatever
+        the task actually touches — with enough of the recent documents to recognise the
+        line of work in progress.
+
+        Until 2026-09-19 this globbed ONE directory NON-recursively. On a project whose
+        designs live one level down (`doc/architecture/<line>/*.md`) that matched none of
+        them, and the single unrelated file that did sit at the top level became the whole
+        of "existing architecture" — so an author correcting a C design was shown a
+        proposal to rewrite that component in another language, and never saw the
+        decisions log it had to extend. Recursive, multi-root and index-first fixes that.
+
+        Newest first, by modification time: the documents of the line being worked on now
+        are the ones an author needs, while alphabetical order over `ADR-00nn` /
+        `ARCH-CT-*` names carries no relevance signal whatsoever.
+        """
+        roots = [d for d in self.docs_arch if d.exists()]
+        if not roots:
+            missing = ", ".join(str(d) for d in self.docs_arch)
+            return f"(no existing architecture docs directory: {missing})"
+
+        found = []
+        for root in roots:
+            for f in root.rglob("*.md"):
+                try:
+                    found.append((f.stat().st_mtime, f, root))
+                except OSError:
+                    # dangling symlink / unreadable file: skip it rather than abort the run
+                    continue
+        if not found:
+            return "(the architecture docs directories hold no .md files)"
+        found.sort(key=lambda row: row[0], reverse=True)
+
+        def label(f, root):
             try:
-                snippet = f.read_text(encoding="utf-8", errors="replace")[:1500]
+                return str(f.relative_to(root.parent))
+            except ValueError:
+                return f.name
+
+        shown = found[:self.ARCH_INDEX_MAX]
+        index = "\n".join(f"- {label(f, root)}" for _, f, root in shown)
+        if len(found) > len(shown):
+            index += f"\n- … and {len(found) - len(shown)} more"
+        parts = [f"{len(found)} documents exist, newest first. Read any of them "
+                 f"by path if the task touches it:\n{index}"]
+
+        for _, f, root in found[:self.ARCH_EXCERPTS]:
+            try:
+                snippet = f.read_text(encoding="utf-8", errors="replace")[:self.ARCH_EXCERPT_CHARS]
             except OSError:
-                # skip dangling symlinks / unreadable files instead of
-                # aborting the whole run
                 continue
-            parts.append(f"### {f.name}\n{snippet}")
-        return "\n\n".join(parts) or "(docs/architecture/ is empty)"
+            parts.append(f"### {label(f, root)}\n{snippet}")
+        return "\n\n".join(parts)
 
     def _git(self, repo, *args):
         return subprocess.run(["git", "-C", str(repo), *args],

@@ -53,7 +53,8 @@ kept outside it, says what THIS project is:
     "repo_root": "..",                       // the multi-repo workspace root
     "dev_repos":      ["service-a", "sdk"],  // the Developer MAY edit these
     "analysis_repos": ["upstream-x"],        // read-only context, never modified
-    "docs_architecture": "../docs/architecture"
+    "docs_architecture": ["../service-a/doc/architecture"] // one path or several;
+                                             // searched RECURSIVELY
   },
   "guard":   { "enabled": true, "exclude_prefix": "orchestration" },
   "context_file": "context.md",              // appended to EVERY role's prompt
