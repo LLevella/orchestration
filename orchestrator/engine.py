@@ -2103,6 +2103,12 @@ class Engine:
         p = [f"## Task\n{task}",
              self.ctx.repo_scope_prompt(),
              f"## Approved architecture\n{arch}",
+             # The INDEX only, never the excerpts: the approved architecture above is this
+             # run's specification, but the decisions log and the ADRs are what stop a change
+             # from quietly contradicting a ratified one, and a developer cannot open a
+             # document it does not know exists (Irina 2026-09-20).
+             "## Other architecture documents (context — open what your change touches)\n"
+             + self.ctx.read_existing_arch(excerpts=False),
              "## Build/test cadence\nRun the FULL build/test suite as a CLOSURE check once you "
              "believe the change is complete — NOT on every intermediate iteration; iterate with "
              "focused, cheap checks meanwhile. (Reviewers read the diff each cycle regardless.)"]
@@ -2148,8 +2154,13 @@ class Engine:
                 "as Architect (architecture impact, boundaries, ADR need)")
         arch_block = ""
         if kind == "arch" and arch_path:
+            # The Architect gate is the one that can catch a diff contradicting a decision
+            # ratified somewhere OTHER than the approved architecture - an ADR, a decisions
+            # log entry. It needs to know those documents exist; the index, not their text.
             arch_block = (f"## Approved architecture (read at `{arch_path}`)\nJudge the diff "
-                          "against it — open the sections the change touches.\n\n")
+                          "against it — open the sections the change touches.\n\n"
+                          "## Other architecture documents (open what the diff touches)\n"
+                          + self.ctx.read_existing_arch(excerpts=False) + "\n\n")
         return (f"## Task\n{task}\n\n## {self.ctx.repo_scope_line()}\n\n"
                 f"{arch_block}"
                 f"{self._review_history_block(history)}"

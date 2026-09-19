@@ -33,6 +33,9 @@ def _engine():
     ctx = MagicMock()
     ctx.workflows = workflows
     ctx.repo_scope_line.return_value = "Scope — WRITABLE: repo-a; READ-ONLY: repo-b."
+    ctx.repo_scope_prompt.return_value = "## Scope\nWRITABLE: repo-a; READ-ONLY: repo-b."
+    # The corpus index the dev prompts carry (index only, never the excerpts).
+    ctx.read_existing_arch.return_value = "2 documents exist, newest first:\n- line/DEC.md\n- adr/ADR-0001.md"
     return Engine(ctx, "development")
 
 
@@ -41,6 +44,31 @@ class TestReviewerContext(unittest.TestCase):
         e = _engine()
         p = e._review_prompt("task", "diff", "summary", "arch", arch_path="/run/arch.md")
         self.assertIn("/run/arch.md", p)
+
+    def test_architect_is_told_which_other_architecture_docs_exist(self):
+        """A diff can contradict a decision ratified outside the approved architecture -
+        an ADR, a decisions-log entry. The Architect gate cannot open a document it does
+        not know exists, so the index rides along (Irina 2026-09-20)."""
+        e = _engine()
+        p = e._review_prompt("task", "diff", "summary", "arch", arch_path="/run/arch.md")
+        self.assertIn("adr/ADR-0001.md", p)
+        self.assertIn("Other architecture documents", p)
+
+    def test_developer_is_told_which_architecture_docs_exist(self):
+        e = _engine()
+        p = e._dev_prompt("task", "/run/arch.md", None, 1)
+        self.assertIn("line/DEC.md", p)
+        self.assertIn("/run/arch.md", p, "the approved architecture pointer must survive")
+
+    def test_the_index_rides_along_but_the_excerpts_do_not(self):
+        """Index only: the dev prompts are rebuilt every iteration, so eight document
+        heads would be re-sent every time for no gain."""
+        e = _engine()
+        e._dev_prompt("task", "/run/arch.md", None, 1)
+        e._review_prompt("task", "diff", "summary", "arch", arch_path="/run/arch.md")
+        for call in e.ctx.read_existing_arch.call_args_list:
+            self.assertEqual(call.kwargs.get("excerpts"), False,
+                             "dev prompts must ask for the index without excerpts")
 
     def test_no_architecture_block_when_none_supplied(self):
         e = _engine()

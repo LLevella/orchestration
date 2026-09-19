@@ -670,8 +670,13 @@ class RunContext:
     ARCH_EXCERPT_CHARS = 1500
     ARCH_INDEX_MAX = 150
 
-    def read_existing_arch(self) -> str:
-        """What architecture documents exist, plus the head of the newest few.
+    def read_existing_arch(self, excerpts: bool = True) -> str:
+        """What architecture documents exist, plus (when `excerpts`) the head of the newest few.
+
+        `excerpts=False` returns the index alone. That is what a DEVELOPER wants: its
+        specification is the approved architecture it is handed as a path, and what it
+        additionally needs is to know that the decisions log and the ADRs exist so it can
+        open the one its change touches - not eight document heads re-sent every iteration.
 
         An author is read-only on the repositories but CAN read files, so the useful
         thing to hand it is an INDEX of what exists — it can then go and read whatever
@@ -718,6 +723,8 @@ class RunContext:
             index += f"\n- … and {len(found) - len(shown)} more"
         parts = [f"{len(found)} documents exist, newest first. Read any of them "
                  f"by path if the task touches it:\n{index}"]
+        if not excerpts:
+            return parts[0]
 
         for _, f, root in found[:self.ARCH_EXCERPTS]:
             try:
