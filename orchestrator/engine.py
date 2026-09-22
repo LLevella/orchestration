@@ -1212,7 +1212,7 @@ class Engine:
     #   deadlock the Arbiter is called (tier 2).
     def _arch_author_prompt(self, task, ctx_docs, draft, review, ruling=None, ruling_by=None,
                             active_findings=None, review_is_historical=False,
-                            semantic_ruling=None):
+                            semantic_ruling=None, standing_human=None):
         """The author's prompt for one iteration.
 
         `active_findings` is the ONE-SHOT manifest of gate blockers this author must
@@ -1258,6 +1258,21 @@ class Engine:
                      f"already been made once)\n{semantic_ruling}")
         if ruling:
             p.append(f"## {ruling_by or 'Arbiter'} ruling (binding — apply the smallest safe action)\n{ruling}")
+        # A human ruling supplied with --human-answer is STANDING for the whole resumed
+        # run, not a one-shot applied at the stop point. The one-shot path below still
+        # exists and still buys iterations; this is what makes the ruling reach the
+        # author on EVERY iteration in between. Without it a resume that is interrupted,
+        # or that converges before the budget boundary, never shows the human's decision
+        # to the agent that has to act on it - which is exactly what happened on five
+        # consecutive resumes (2026-09-22).
+        if standing_human:
+            p.append("## Human ruling (STANDING, binding for this whole run)\n"
+                     f"{standing_human}\n\n"
+                     "This was supplied by the human who owns this decision. It outranks the "
+                     "gate report and any arbiter ruling above, it applies to every iteration "
+                     "of this run, and it is not spent by being applied once. Where it settles "
+                     "a question, treat the question as settled and say so rather than "
+                     "re-opening it.")
         if not draft:
             p.append("Produce the first architecture proposal draft.")
         return "\n\n".join(p)
@@ -1738,6 +1753,9 @@ class Engine:
         disagreements = []
         ruling = ruling_by = None            # a pending binding ruling for the author to apply
         human_answer = self.ctx.human_answer  # set only when resuming a paused run
+        # The one-shot copy above is consumed when it is applied at the arbiter or the
+        # budget boundary. This one is not: it rides every author prompt of this run.
+        standing_human = self.ctx.human_answer
         nr_streak = 0                        # consecutive Developer NEEDS_REVISION
         tl_rejects = 0                       # cumulative Tech-Lead non-approvals
 
@@ -1784,7 +1802,8 @@ class Engine:
                                               ruling=ruling, ruling_by=ruling_by,
                                               active_findings=active,
                                               review_is_historical=sem.review_historical,
-                                              semantic_ruling=sem.pending_ruling)
+                                              semantic_ruling=sem.pending_ruling,
+                                              standing_human=standing_human)
                 aresp, _ = self.call("arch.author", author, ap, phase="architecture",
                                      iteration=i, parse=False)
                 # The RAW reply — disposition block included — stays in the step journal,
