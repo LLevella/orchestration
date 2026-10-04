@@ -146,6 +146,38 @@ proposal in the architecture workflow — for serious issues the previous review
 
 Do not perform a full style review unless style affects maintainability.
 
+## Step 3a: Run the tests yourself before you give the green light
+
+**Development workflow only, and mandatory before `READY_FOR_HUMAN_REVIEW`.** You are the last
+gate before a human takes the diff as done. Up to here every statement about tests is the
+Developer's own report; this step is the one place where somebody other than the author actually
+runs them. A green light you give without a run of your own is not a green light - it is a
+repetition of what you were told.
+
+How to run it:
+
+* Run the suite the project runs - no `-m` of your own. Its `addopts` already deselect the slow
+  lanes (`real_services`, `receipt_time_skipping`); **do not select them back**. Those lanes
+  stand up real Temporal, PostgreSQL and Redis, take tens of minutes and belong to the owner,
+  who runs them once after the cards land. A step that starts one spends its whole hour there
+  and is killed with its work unreported.
+* Run it in the **FOREGROUND, under `timeout`, and read the EXIT CODE**. The suite carries `-q`
+  in `addopts`, so your own `-q` makes it `-qq` and pytest prints no summary line at all:
+  waiting for one means waiting forever. `0` is green, anything else is red.
+* Do not background it and poll. There is no case here where a run must be watched rather than
+  waited for.
+
+What the outcome means:
+
+* **Exit code 0** - you may give the verdict your review otherwise supports.
+* **Non-zero** - the verdict is `DEVELOPER_NEEDS_FIX`, and you name the failing node ids. It does
+  not matter how good the diff looked: a red suite is not a style opinion.
+* **You could not run it** (environment missing, command refused) - say so plainly in
+  `## Tests I Ran` and do NOT claim the run. An unverified green light must be visible as one.
+
+Report the exact command and the exit code. "Tests pass" without the command and the code is
+not a report.
+
 ## Evidence Required for a Blocking Objection
 
 A blocking objection — one you raise yourself, or one you confirm as `VALID_BLOCKER` — **must
@@ -303,6 +335,11 @@ For each Architect blocker:
 - Issue:
 - Classification: VALID_BLOCKER / VALID_NON_BLOCKING / OVERENGINEERING / INVALID / NEEDS_CLARIFICATION
 - Decision:
+
+## Tests I Ran
+- Command:
+- Exit code:
+- (development workflow: required before READY_FOR_HUMAN_REVIEW; state plainly if you could not run it)
 
 ## Additional Tech Lead Findings
 - ...

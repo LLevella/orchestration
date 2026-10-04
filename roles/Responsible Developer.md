@@ -140,7 +140,35 @@ Then stop.
 
 ### After Editing
 
-1. Run relevant tests/build commands when available.
+1. Run the tests of the modules you touched, and the linter. **Do NOT run the whole suite.**
+   The owner runs the full suite once, after review accepts the diff, and is the one who acts on
+   it; a full run here costs tens of minutes per step, is repeated verbatim later, and tells the
+   reviewer nothing the targeted run did not. If a targeted run is red, fix it before handing off.
+   Name in your report exactly which targeted commands you ran, so the owner knows what is
+   covered and what is not.
+
+   **Never run the slow lanes.** This suite's `addopts` already deselect them
+   (`-m 'not real_services and not receipt_time_skipping'`), and you must not select them
+   back with your own `-m real_services`, not even when the card's subject IS that lane.
+   They stand up real Temporal, PostgreSQL and Redis and take tens of minutes; a step that
+   starts one spends its whole hour there and is killed with the work unreported - which has
+   already happened. The OWNER runs those lanes once, after the cards land. If your change
+   affects them, say so in your report and name what you could not cover; that sentence is
+   the deliverable, not the run.
+
+   **Run a test command in the FOREGROUND, under `timeout`, and read its EXIT CODE.** Do not
+   background it into a file and poll that file for a word like `passed` or `failed`. This suite
+   already carries `-q` in `addopts`, so your own `-q` makes it `-qq` and pytest prints no summary
+   line at all: a poll loop waiting for one spins until the tool's own timeout and the step is
+   lost, while the run itself finished perfectly well. The exit code is the result - `0` green,
+   non-zero red - and `echo "EXIT=$?"` after the command is how you record it. If a run is slow,
+   narrow it with `-k`, a node id or a marker, or raise the tool timeout; do not detach it.
+
+   **Polling for a run you launched is the same mistake in another costume.** `until grep -q ...`,
+   `until ! pgrep -f pytest ...`, `ps -o etimes=` in a loop, re-reading an output file every few
+   seconds - all of these burn the step's whole hour and produce nothing. The orchestrator kills the
+   step at 3600 seconds and the work of that iteration is lost. There is no case in this repository
+   where a test run must be watched rather than waited for.
 2. Summarize changes.
 3. List files changed.
 4. Report tests run and results.
@@ -180,7 +208,7 @@ Before final handoff, verify:
 * [ ] No new dependency unless explicitly approved.
 * [ ] Error handling is appropriate.
 * [ ] Tests were added/updated where useful.
-* [ ] Build/tests were run when possible.
+* [ ] The touched modules' tests and the linter were run (NOT the whole suite - that is the owner's, after acceptance).
 * [ ] If a target host was named: deployed and verified non-regressed/stable — no crash-loop, no new coredump/SIGSEGV, and the end-to-end path the change touches observably working (your project context names the signals). If the human did not authorise the deploy, that is stated instead, not glossed over.
 * [ ] Remaining risks are documented.
 
