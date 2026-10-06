@@ -3,7 +3,9 @@
 #
 # Usage:  run-chain.sh <chain-file> [tag ...]
 #
-# The chain file has one atom per line, four TAB-separated fields:
+# The chain file opens with two declarations - which repositories it spans and
+# which branch they must be on - and then has one atom per line, four
+# TAB-separated fields:
 #
 #     tag <TAB> brief-path <TAB> allowed-paths <TAB> subject
 #
@@ -51,6 +53,28 @@ for pair in $repos; do
     [[ "$pair" == *:* ]] || { echo "malformed repo pair '$pair', want alias:path" >&2; exit 2; }
     REPO[${pair%%:*}]="$ROOT/${pair#*:}"
 done
+
+# WHICH BRANCH, also declared by the chain file:
+#
+#     #branch: feat/phs-ct-1e1-lane-directory
+#
+# Every repository the chain touches must already be on it, and the runner
+# refuses to start otherwise. A chain is a long unattended sequence of commits;
+# discovering afterwards that they landed on the wrong branch costs a rewrite
+# of history that a pushed branch may not allow at all. The runner does NOT
+# create the branch - deciding where work belongs is not a thing to automate -
+# it only refuses to proceed if the answer is not already in place.
+branch="$(sed -n 's|^#branch:[[:space:]]*||p' "$CHAIN" | head -1)"
+if [[ -n "$branch" ]]; then
+    for r in "${!REPO[@]}"; do
+        on="$(git -C "${REPO[$r]}" rev-parse --abbrev-ref HEAD)"
+        [[ "$on" == "$branch" ]] || {
+            echo "${REPO[$r]} is on '$on', the chain declares '$branch'" >&2
+            echo "create or check it out first; this runner will not do it for you" >&2
+            exit 2
+        }
+    done
+fi
 
 NAME=$(basename "$CHAIN" .chain)
 OUT="${CHAIN_OUT:-$(cd "$(dirname "$CHAIN")" && pwd)}"
