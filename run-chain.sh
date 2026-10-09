@@ -25,6 +25,15 @@
 # The chain does NOT build and does NOT run gates. That is the maintainer's
 # single pass at the end, which is where this project has found most of its
 # gate defects anyway.
+#
+# CONTINUING A STOPPED ATOM. Normally every atom must start on a clean tree:
+# leftovers mean the previous atom is not committed. When an atom stopped with
+# its work still in the tree - for example a run that ended waiting on a
+# decision - and the maintainer wants it redone with a sharper brief ON THAT
+# CODE, set CHAIN_CONTINUE_DIRTY=1 and name the atoms to run, the stopped one
+# first. Only the FIRST atom may then start dirty, and only if every changed
+# path is inside that atom's declared paths; anything else still stops the
+# chain. Every later atom requires a clean tree as before.
 set -uo pipefail
 
 # The workspace and the repositories it chains over. Defaults match this
@@ -103,15 +112,39 @@ set -a; . ~/.config/orchestration/deepseek.env; . ~/.config/orchestration/gemini
 : > "$STATE"
 say "chain $NAME: ${#ATOMS[@]} atom(s)"
 
+# Count, and log, the changed paths that lie outside an atom's declared list.
+outside_paths() {
+    local tag="$1" allowed="$2" r want path a ok n=0
+    for r in "${!REPO[@]}"; do
+        want=$(printf '%s\n' "${allowed//,/$'\n'}" | sed -n "s|^$r:||p")
+        while read -r _ path; do
+            [[ -n "$path" ]] || continue
+            ok=0
+            while read -r a; do [[ -n "$a" ]] || continue; [[ "$path" == "$a" || "$path" == "$a"/* ]] && ok=1; done <<< "$want"
+            if [[ "$ok" -eq 0 ]]; then
+                say "$tag: OUTSIDE its declared paths: $r:$path"
+                n=$((n+1))
+            fi
+        done < <(git -C "${REPO[$r]}" status --porcelain | sed 's/^...//;s/^/x /')
+    done
+    return "$n"
+}
+
+first=1
 for entry in "${ATOMS[@]}"; do
     IFS=$'\t' read -r tag brief allowed subject <<< "$entry"
 
     dirty=0
     for r in "${!REPO[@]}"; do dirty=$(( dirty + $(git -C "${REPO[$r]}" status --porcelain | wc -l) )); done
     if [[ "$dirty" -ne 0 ]]; then
-        say "$tag: STOP - the tree is dirty ($dirty path(s)); the previous atom is not committed"
-        echo -e "$tag\tDIRTY_TREE" >> "$STATE"; break
+        if [[ "$first" -eq 1 && "${CHAIN_CONTINUE_DIRTY:-0}" == "1" ]] && outside_paths "$tag" "$allowed"; then
+            say "$tag: continuing on a dirty tree ($dirty path(s), all inside its declared paths) - CHAIN_CONTINUE_DIRTY=1"
+        else
+            say "$tag: STOP - the tree is dirty ($dirty path(s)); the previous atom is not committed"
+            echo -e "$tag\tDIRTY_TREE" >> "$STATE"; break
+        fi
     fi
+    first=0
 
     [[ -r "$ROOT/$brief" ]] || { say "$tag: STOP - no brief at $brief"; echo -e "$tag\tNO_BRIEF" >> "$STATE"; break; }
 
@@ -123,19 +156,7 @@ for entry in "${ATOMS[@]}"; do
     say "$tag: run finished rc=$rc status=$status"
 
     # What the run actually changed, per repo.
-    stray=0
-    for r in "${!REPO[@]}"; do
-        want=$(printf '%s\n' "${allowed//,/$'\n'}" | sed -n "s|^$r:||p")
-        while read -r _ path; do
-            [[ -n "$path" ]] || continue
-            ok=0
-            while read -r a; do [[ -n "$a" ]] || continue; [[ "$path" == "$a" || "$path" == "$a"/* ]] && ok=1; done <<< "$want"
-            if [[ "$ok" -eq 0 ]]; then
-                say "$tag: OUTSIDE its declared paths: $r:$path"
-                stray=$((stray+1))
-            fi
-        done < <(git -C "${REPO[$r]}" status --porcelain | sed 's/^...//;s/^/x /')
-    done
+    outside_paths "$tag" "$allowed"; stray=$?
     if [[ "$stray" -ne 0 ]]; then
         say "$tag: STOP - $stray path(s) outside the atom's declared scope; nothing committed, decide by hand"
         echo -e "$tag\tSTRAY_PATHS\t$status" >> "$STATE"; break
