@@ -73,12 +73,29 @@ done
 # of history that a pushed branch may not allow at all. The runner does NOT
 # create the branch - deciding where work belongs is not a thing to automate -
 # it only refuses to proceed if the answer is not already in place.
+#
+# When the repositories carry the work on DIFFERENT branches - a PHS branch and
+# its paired SDK branch - name one per alias instead:
+#
+#     #branch: phs=feat/phs-x sdk=feat/sdk-x
+#
+# Every declared repository must then be named, and each must be on its own.
 branch="$(sed -n 's|^#branch:[[:space:]]*||p' "$CHAIN" | head -1)"
 if [[ -n "$branch" ]]; then
+    declare -A WANT
+    if [[ "$branch" == *=* ]]; then
+        for pair in ${branch//,/ }; do
+            [[ "$pair" == *=* ]] || { echo "malformed branch pair '$pair', want alias=branch" >&2; exit 2; }
+            WANT[${pair%%=*}]="${pair#*=}"
+        done
+    else
+        for r in "${!REPO[@]}"; do WANT[$r]="$branch"; done
+    fi
     for r in "${!REPO[@]}"; do
+        [[ -n "${WANT[$r]:-}" ]] || { echo "the chain names no branch for repo alias '$r'" >&2; exit 2; }
         on="$(git -C "${REPO[$r]}" rev-parse --abbrev-ref HEAD)"
-        [[ "$on" == "$branch" ]] || {
-            echo "${REPO[$r]} is on '$on', the chain declares '$branch'" >&2
+        [[ "$on" == "${WANT[$r]}" ]] || {
+            echo "${REPO[$r]} is on '$on', the chain declares '${WANT[$r]}'" >&2
             echo "create or check it out first; this runner will not do it for you" >&2
             exit 2
         }
