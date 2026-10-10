@@ -1,0 +1,12 @@
+# Read-only policy for the gemini CLI when it sits in an orchestrator cell.
+# The cell may RUN commands (a Technical Lead runs the test suite) but must not
+# edit files; the git guard double-checks independently.
+[[rule]]
+toolName = "write_file"
+decision = "deny"
+priority = 900
+
+[[rule]]
+toolName = "replace"
+decision = "deny"
+priority = 900
