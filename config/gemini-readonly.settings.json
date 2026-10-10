@@ -1,0 +1,10 @@
+{
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    }
+  },
+  "tools": {
+    "exclude": ["write_file", "replace"]
+  }
+}
