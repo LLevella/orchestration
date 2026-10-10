@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": ["command(*)"],
+    "deny": ["write_file(*)"],
+    "ask": []
+  }
+}

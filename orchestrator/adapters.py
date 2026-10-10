@@ -267,6 +267,11 @@ class Adapter:
 CONFIG_DIR = str(Path(__file__).resolve().parent.parent / "config")
 
 
+def _expand_path(value: str) -> str:
+    """`~` and `{config_dir}` in a configured path or env value."""
+    return os.path.expanduser(value.replace("{config_dir}", CONFIG_DIR))
+
+
 class CliAdapter(Adapter):
     def _base_cmd(self):
         return self.cfg.get("command") or self.cfg.get("cli_command")
@@ -305,6 +310,12 @@ class CliAdapter(Adapter):
         if use_stdin:
             cmd = [sub(c) for c in command if c != "{prompt}"]
             stdin_data = full_prompt
+            # `ndjson_user_event`: the CLI reads one NDJSON message per line on
+            # stdin (Antigravity's `agy --input-format stream-json`), so the
+            # whole prompt travels as ONE user event - any length, no argv.
+            if self.cfg.get("stdin_format") == "ndjson_user_event":
+                stdin_data = json.dumps(
+                    {"event": "user", "message": {"content": full_prompt}}) + "\n"
         else:
             cmd = [sub(c) for c in command]
             stdin_data = None
@@ -349,7 +360,39 @@ class CliAdapter(Adapter):
             return self._parse_claude_json(stdout)
         if fmt == "codex_text":
             return self._parse_codex_text(stdout)
+        if fmt == "agy_stream_json":
+            return self._parse_agy_stream_json(stdout)
         return ParsedOutput(text=(stdout or "").strip())
+
+    @staticmethod
+    def _parse_agy_stream_json(stdout):
+        """`agy --output-format stream-json`: NDJSON events, the last of which is
+        {"event": "result", "result": {status, response, error, usage}}. agy exits
+        0 even when the turn failed (a quota, a sign-in), so the provider's own
+        `status` decides: anything but SUCCESS is an error, and the result object
+        goes to the classifier as the body. No result event is plain output."""
+        result = None
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(ev, dict) and ev.get("event") == "result" \
+                    and isinstance(ev.get("result"), dict):
+                result = ev["result"]
+        if result is None:
+            return ParsedOutput(text=(stdout or "").strip())
+        u = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        inp, out = _opt_int(u.get("input_tokens")), _opt_int(u.get("output_tokens"))
+        usage = _usage(input=inp, input_cache_read=_opt_int(u.get("cache_read_tokens")),
+                       output=out, total=_opt_int(u.get("total_tokens")))
+        is_error = result.get("status") != "SUCCESS"
+        response = result.get("response")
+        text = "" if is_error or not isinstance(response, str) else response.strip()
+        return ParsedOutput(text=text, usage=usage, body=result, is_error=is_error)
 
     @staticmethod
     def _parse_claude_json(stdout):
@@ -404,8 +447,24 @@ class CliAdapter(Adapter):
         cmd, stdin_data = self._build(system, prompt, allow_edit)
         run_env = None
         if self.cfg.get("env"):
-            # per-agent env overlay (e.g. MAX_THINKING_TOKENS to raise reasoning effort)
-            run_env = {**os.environ, **{k: str(v) for k, v in self.cfg["env"].items()}}
+            # per-agent env overlay (e.g. MAX_THINKING_TOKENS to raise reasoning effort).
+            # Values may use `~` and `{config_dir}`.
+            run_env = {**os.environ, **{k: _expand_path(str(v))
+                                        for k, v in self.cfg["env"].items()}}
+        # `files`: {destination: source} copied before every run - e.g. a CLI's
+        # settings file placed into the private HOME the cell runs under, so the
+        # tool's rules live in this repo and the destination stays out of it.
+        for dst, src in (self.cfg.get("files") or {}).items():
+            try:
+                dst_p, src_p = Path(_expand_path(dst)), Path(_expand_path(src))
+                dst_p.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src_p, dst_p)
+            except OSError as e:
+                reason = f"cannot prepare {dst} from {src}: {e}"
+                return AgentResponse(self.name, UNAVAILABLE, error=reason,
+                                     failure=failures.classify(stderr=reason,
+                                                               local_kind=failures.CONFIGURATION,
+                                                               local_reason=reason))
         t0 = time.time()
         try:
             p = subprocess.run(cmd, input=stdin_data, capture_output=True,

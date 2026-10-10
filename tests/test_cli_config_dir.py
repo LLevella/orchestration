@@ -37,18 +37,60 @@ class TestConfigDirPlaceholder(unittest.TestCase):
         cmd_edit, _ = adapter._build("sys", "hello", allow_edit=True)
         self.assertIn(f"{CONFIG_DIR}/rw.toml", cmd_edit)
 
-    def test_gemini_cell_names_no_absolute_path_and_its_policy_exists(self):
+    def test_gemini_cell_carries_no_absolute_path_and_its_rules_exist(self):
         agents = json.loads((TOOL_ROOT / "config" / "agents.json").read_text())
-        template = agents["agents"]["gemini"]["command"]
-        self.assertFalse(any(c.startswith("/") for c in template),
-                         "the gemini command template carries an absolute path")
-        gemini = build_adapters(agents, mock=False, scenario=None)["gemini"]
-        cmd, stdin = gemini._build("sys", "prompt", allow_edit=False)
-        policy = cmd[cmd.index("--policy") + 1]
-        self.assertTrue(os.path.isabs(policy))
-        self.assertTrue(Path(policy).is_file(), policy)
-        self.assertEqual(Path(policy).parent, Path(CONFIG_DIR))
+        cell = agents["agents"]["gemini"]
+        values = list(cell["command"]) + list(cell.get("env", {}).values()) \
+            + list(cell.get("files", {}).keys()) + list(cell.get("files", {}).values())
+        self.assertFalse(any(v.startswith("/") for v in values),
+                         "the gemini cell carries an absolute path")
+        for src in cell["files"].values():
+            resolved = Path(src.replace("{config_dir}", CONFIG_DIR))
+            self.assertTrue(resolved.is_file(), resolved)
+            rules = json.loads(resolved.read_text())["permissions"]
+            self.assertIn("write_file(*)", rules["deny"])
+            self.assertIn("command(*)", rules["allow"])
 
+
+class TestAgyTransport(unittest.TestCase):
+    CFG = {"transport": "cli", "command": ["agy", "--input-format", "stream-json"],
+           "stdin": True, "stdin_format": "ndjson_user_event",
+           "usage_format": "agy_stream_json"}
+
+    def test_prompt_travels_as_one_ndjson_user_event(self):
+        cmd, stdin = CliAdapter("g", self.CFG)._build("SYS", "line1\nline2", False)
+        self.assertEqual(stdin.count("\n"), 1, "more than one NDJSON line")
+        ev = json.loads(stdin)
+        self.assertEqual(ev["event"], "user")
+        self.assertIn("line1\nline2", ev["message"]["content"])
+        self.assertIn("SYS", ev["message"]["content"])
+
+    def _parse(self, lines):
+        return CliAdapter("g", self.CFG)._parse_output("\n".join(lines))
+
+    def test_success_result_is_the_answer(self):
+        out = self._parse(['{"event":"init"}', '{"event":"step_update"}',
+                           json.dumps({"event": "result", "result": {
+                               "status": "SUCCESS", "response": "VERDICT\n",
+                               "usage": {"input_tokens": 10, "output_tokens": 3,
+                                         "total_tokens": 13}}})])
+        self.assertFalse(out.is_error)
+        self.assertEqual(out.text, "VERDICT")
+        self.assertEqual(out.usage["input"], 10)
+        self.assertEqual(out.usage["total"], 13)
+
+    def test_non_success_status_is_an_error_even_with_exit_zero(self):
+        out = self._parse([json.dumps({"event": "result", "result": {
+            "status": "ERROR", "response": "",
+            "error": "RESOURCE_EXHAUSTED (code 429): Individual quota reached."}})])
+        self.assertTrue(out.is_error)
+        self.assertEqual(out.text, "")
+        self.assertIn("quota", out.body["error"])
+
+    def test_no_result_event_is_plain_output(self):
+        out = self._parse(["plain words"])
+        self.assertFalse(out.is_error)
+        self.assertEqual(out.text, "plain words")
 
 if __name__ == "__main__":
     unittest.main()
