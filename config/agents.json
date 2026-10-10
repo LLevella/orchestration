@@ -331,7 +331,8 @@
       "read_only_args": [],
       "edit_args": [],
       "env": {
-        "HOME": "~/.cache/orchestration/agy-home"
+        "HOME": "~/.cache/orchestration/agy-home",
+        "PYTHONDONTWRITEBYTECODE": "1"
       },
       "files": {
         "~/.cache/orchestration/agy-home/.gemini/antigravity-cli/settings.json": "{config_dir}/agy-readonly.settings.json"
