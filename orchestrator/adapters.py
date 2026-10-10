@@ -19,6 +19,7 @@ import math
 import os
 import re
 import shutil
+from pathlib import Path
 import subprocess
 import time
 import urllib.error
@@ -259,6 +260,13 @@ class Adapter:
         raise NotImplementedError
 
 
+# `{config_dir}` in a CLI command template is this tool's own config directory,
+# resolved from where the code lives - so agents.json can name a file shipped
+# beside it (a policy, a settings file) without an absolute path that ties the
+# tool to one checkout, and independently of the subprocess's working directory.
+CONFIG_DIR = str(Path(__file__).resolve().parent.parent / "config")
+
+
 class CliAdapter(Adapter):
     def _base_cmd(self):
         return self.cfg.get("command") or self.cfg.get("cli_command")
@@ -290,7 +298,9 @@ class CliAdapter(Adapter):
         full_prompt = prompt if (has_sys_placeholder or sys_arg) else f"{system}\n\n{prompt}"
 
         def sub(x):
-            return x.replace("{prompt}", full_prompt).replace("{system}", system)
+            return (x.replace("{prompt}", full_prompt)
+                     .replace("{system}", system)
+                     .replace("{config_dir}", CONFIG_DIR))
 
         if use_stdin:
             cmd = [sub(c) for c in command if c != "{prompt}"]
@@ -302,9 +312,9 @@ class CliAdapter(Adapter):
             cmd += [sub(c) for c in sys_arg]
         cmd += self._extra_cli_flags(cmd)
         if allow_edit and self.can_edit:
-            cmd += list(self.cfg.get("edit_args") or [])
+            cmd += [sub(c) for c in (self.cfg.get("edit_args") or [])]
         else:
-            cmd += list(self.cfg.get("read_only_args") or [])
+            cmd += [sub(c) for c in (self.cfg.get("read_only_args") or [])]
         return cmd, stdin_data
 
     def _usage_format(self):

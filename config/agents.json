@@ -339,7 +339,7 @@
         "--approval-mode",
         "yolo",
         "--policy",
-        "/home/irina/work/dataplane/orchestration/config/gemini-readonly.policy.toml",
+        "{config_dir}/gemini-readonly.policy.toml",
         "-p",
         "Follow the instructions given on stdin."
       ],
@@ -350,7 +350,7 @@
       "env": {
         "GEMINI_CLI_TRUST_WORKSPACE": "true"
       },
-      "_cli_2026_10_10": "2026-10-10 (Irina): gemini runs through the CLI (0.63.0) pinned to gemini-3.8-flash - the CLI default answered 429 too, so the newest available Flash is named explicitly. Prompt on stdin (-p is appended to stdin); API-key auth from GEMINI_API_KEY in the orchestrator's environment and ~/.gemini/settings.json (selectedType gemini-api-key). READ-ONLY BY POLICY: --policy config/gemini-readonly.policy.toml denies write_file and replace, so a Technical Lead can RUN the test suite but not edit; probed - without the policy the same request writes the file, with it the write is refused and a shell command still runs. The git guard double-checks. A system-settings file cannot do this: the CLI ignores system settings whose path is user-writable. --approval-mode yolo lets the shell tool run unattended. The key is free tier (3.8-flash: 20 requests per day); quota/429 text from the CLI shifts the cell left like the API did."
+      "_cli_2026_10_10": "2026-10-10 (Irina): gemini runs through the CLI (0.63.0) pinned to gemini-3.8-flash - the CLI default answered 429 too, so the newest available Flash is named explicitly. Prompt on stdin (-p is appended to stdin); API-key auth from GEMINI_API_KEY in the orchestrator's environment and ~/.gemini/settings.json (selectedType gemini-api-key). READ-ONLY BY POLICY: --policy {config_dir}/gemini-readonly.policy.toml ({config_dir} = this tool's config/ directory, resolved by the CLI adapter) denies write_file and replace, so a Technical Lead can RUN the test suite but not edit; probed - without the policy the same request writes the file, with it the write is refused and a shell command still runs. The git guard double-checks. A system-settings file cannot do this: the CLI ignores system settings whose path is user-writable. --approval-mode yolo lets the shell tool run unattended. The key is free tier (3.8-flash: 20 requests per day); quota/429 text from the CLI shifts the cell left like the API did."
     },
     "deepseek": {
       "_comment": "Independent 4th-family ARBITER. Two transports supported: 'api' (key in api_env) or 'cli' (e.g. an Ollama-style local model). (configured here as DeepSeek; a Mistral/Ollama-style transport works the same way.) Model PINNED to deepseek-v4-pro: DeepSeek moved to the V4 lineup (only deepseek-v4-flash / deepseek-v4-pro exist via /models). The legacy deepseek-reasoner/deepseek-chat IDs are now flash-only backward-compat ALIASES (reasoner=v4-flash thinking-mode, NEVER pro) and return 404/400 after 2026-07-24 15:59 UTC. v4-pro chosen for the judge role (complex reasoning / code review). Verified 2026-06-17.",
