@@ -172,6 +172,15 @@ for entry in "${ATOMS[@]}"; do
     status=$(head -1 "$run/STATUS" 2>/dev/null || echo NO_STATUS)
     say "$tag: run finished rc=$rc status=$status"
 
+    # Only a run that reached READY_FOR_HUMAN_REVIEW is committed. A paused run
+    # (AWAITING_HUMAN, e.g. an agent out of quota), HUMAN_REQUIRED or a missing
+    # STATUS leaves half-done, unreviewed edits in the tree: keep them there for
+    # `orchestrate.py resume` and stop the chain.
+    if [[ "$status" != "READY_FOR_HUMAN_REVIEW" ]]; then
+        say "$tag: STOP - run status $status is not READY_FOR_HUMAN_REVIEW; nothing committed, edits left in the tree ($run)"
+        echo -e "$tag\tNOT_READY\t$status" >> "$STATE"; break
+    fi
+
     # What the run actually changed, per repo.
     outside_paths "$tag" "$allowed"; stray=$?
     if [[ "$stray" -ne 0 ]]; then
