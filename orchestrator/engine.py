@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 from . import failures
 from .adapters import OK, AgentResponse
@@ -135,7 +138,8 @@ ACTIVE_MANIFEST_CHARS = 8000
 
 
 class AgentError(Exception):
-    pass
+    # The agent whose invocation failed, when the failure comes from one.
+    agent = None
 
 
 class AvailabilityPause(AgentError):
@@ -507,11 +511,28 @@ def unreachable_cells(workflow: str, wf_block: dict, *, iterate: bool = False) -
     return out
 
 
+@dataclass
+class _BatchCall:
+    """One step of a parallel batch: the arguments of Engine.call that vary."""
+    step_id: str
+    spec: dict
+    prompt: str
+    phase: str
+    iteration: int
+
+
 class Engine:
     def __init__(self, ctx, workflow: str):
         self.ctx = ctx
         self.workflow = workflow
         self.roster = None
+        # Guards the roster, the spec["agent"] slots it writes, and live_calls while a
+        # parallel batch runs. Never held across a provider call or a guard snapshot.
+        # Lock order is always this one, then the transcript's.
+        self._lock = threading.RLock()
+        # Per-worker: the OTHER step ids of the batch this thread runs in. Absent on the
+        # main thread, which is how call() tells a batch step from an ordinary one.
+        self._batch = threading.local()
         # Cross-family pin fallbacks USED by this LOGICAL run: what was traded away and
         # why. Journaled once each (run.json.degradations, a roster event, the
         # transcript) and repeated in the final status, because a review done by a
@@ -544,13 +565,14 @@ class Engine:
         it onto the workflow's per-cell spec blocks (so every call() resolves
         `spec["agent"]` from the live roster). Returns the assignment dict."""
         wf = self.ctx.workflows[self.workflow]
-        assignment = self.roster.assign()
-        for cell, agent in assignment.items():
-            blk = wf.get(cell)
-            if isinstance(blk, dict):
-                blk["_cell"] = cell
-                blk["agent"] = agent
-        self._record_degradations()
+        with self._lock:
+            assignment = self.roster.assign()
+            for cell, agent in assignment.items():
+                blk = wf.get(cell)
+                if isinstance(blk, dict):
+                    blk["_cell"] = cell
+                    blk["agent"] = agent
+            self._record_degradations()
         return assignment
 
     def _record_degradations(self):
@@ -696,21 +718,21 @@ class Engine:
         # it here, at the one point every live step passes through, so an iteration loop
         # can charge its budget for any iteration that did real work — whether that work
         # was its opening step or a later one (Irina 2026-08-30).
-        ctx.live_calls += 1
+        with self._lock:
+            ctx.live_calls += 1
 
         # ONE named refresh point per logical call (roster.py): due blocks expire, a
         # fresh local-availability snapshot is taken, and the assignment is recomputed.
         # Nothing is re-admitted WHILE the shift loop below is still searching, so
         # eligibility can only shrink inside one call and the loop always terminates.
+        #
+        # A batch step does not refresh: `_call_batch` did, once, before launching. A
+        # peer's refresh could otherwise re-admit an agent while this step's shift loop
+        # is searching, which is what the termination argument below rules out.
         rostered = cell and self.roster is not None and self.roster.enabled
-        if self.roster is not None and self.roster.enabled:
-            for b in self.roster.begin_call():
-                ctx.tx.event(kind="roster_readmit", step=step_id, scope=b.scope,
-                             selector=b.selector, retry_at=b.retry_at,
-                             kind_of_block=b.kind, reason=b.reason)
-                ctx.tx.md(f"\n> ⤴ block on {b.scope} `{b.selector}` expired "
-                          f"({b.retry_at}) — its agents are eligible again.\n")
-            self._apply_roster_assignment()
+        in_batch = self._in_batch()
+        if self.roster is not None and self.roster.enabled and not in_batch:
+            self._refresh_roster(step_id)
 
         # Shift-left loop: on an availability failure for a roster-managed cell, block
         # the failure's whole DOMAIN (agent / account / provider), recompute the
@@ -721,7 +743,13 @@ class Engine:
         retried_transient: set[str] = set()
         attempt_no = 0
         while True:
-            agent = spec["agent"]
+            with self._lock:
+                agent = spec["agent"]
+                # A step in flight holds its agent from launch, not from completion:
+                # otherwise a shifting peer sees that agent as free and two seats of
+                # one panel end up with the same model.
+                if in_batch and rostered and agent:
+                    self.roster.note_executed(cell, agent)
             if agent is None:
                 msg = (f"no live agent for role '{role}'"
                        + (f" (roster cell '{cell}')" if cell else "")
@@ -808,8 +836,122 @@ class Engine:
             if rostered:
                 # This cell has now RUN. Bind it, so a block expiring later cannot
                 # hand the role to a re-admitted agent mid-run (roster.py, A6).
-                self.roster.note_executed(cell, agent)
+                with self._lock:
+                    self.roster.note_executed(cell, agent)
             return out
+
+    # ---- parallel batches --------------------------------------------
+    def _in_batch(self) -> bool:
+        return getattr(self._batch, "peers", None) is not None
+
+    def _refresh_roster(self, step_id):
+        """The roster's one refresh point: expire due blocks, re-sample availability,
+        recompute the assignment."""
+        with self._lock:
+            for b in self.roster.begin_call():
+                self.ctx.tx.event(kind="roster_readmit", step=step_id, scope=b.scope,
+                                  selector=b.selector, retry_at=b.retry_at,
+                                  kind_of_block=b.kind, reason=b.reason)
+                self.ctx.tx.md(f"\n> ⤴ block on {b.scope} `{b.selector}` expired "
+                               f"({b.retry_at}) — its agents are eligible again.\n")
+            self._apply_roster_assignment()
+
+    def _parallel_limit(self) -> int:
+        """How many steps of this workflow may run at once. A workflow with no `parallel`
+        block runs one at a time, as does `max_workers: 1`, the operator's off switch."""
+        block = self.ctx.workflows[self.workflow].get("parallel") or {}
+        return block.get("max_workers", 1)
+
+    def _call_batch(self, calls, *, stop_on_error=True):
+        """Run independent read-only steps, at the same time when the workflow allows it.
+
+        Returns one outcome per call, in the order given: `(resp, verdict)`, or the
+        exception that step raised, or None for a step never started (only one-at-a-time
+        with `stop_on_error`). The caller decides what a failed step means, so the order
+        of opinions, the Reviewer numbering and every artifact stay independent of which
+        step happened to finish first.
+
+        All peers run to completion even if one fails. Each finished step is journaled,
+        so its paid-for result survives into a resume, which a discarded future would
+        not. Only for read-only steps: the guard's before/after bracket can not separate
+        two writers, and it attributes a change to every step overlapping it.
+
+        `stop_on_error` is the one-at-a-time behaviour of a chain that aborts on the
+        first failure. It cannot apply once the peers are already running."""
+        outcomes = [None] * len(calls)
+
+        def attempt(i, peers=None):
+            c = calls[i]
+            self._batch.peers = peers
+            try:
+                outcomes[i] = self.call(c.step_id, c.spec, c.prompt,
+                                        phase=c.phase, iteration=c.iteration)
+            except Exception as e:  # noqa: BLE001 - carried to the caller, see above
+                outcomes[i] = e
+            finally:
+                self._batch.peers = None
+
+        # Replay first, on this thread and in order: a replay costs nothing and binds its
+        # cell to the agent that really ran it, which the assignment below must see.
+        cache = getattr(self.ctx, "resume_cache", None) or {}
+        live = []
+        for i, c in enumerate(calls):
+            if (c.step_id, c.phase, c.iteration) in cache:
+                attempt(i)
+            else:
+                live.append(i)
+
+        limit = self._parallel_limit()
+        if limit < 2 or len(live) < 2:
+            for i in live:
+                attempt(i)
+                if stop_on_error and isinstance(outcomes[i], Exception):
+                    break
+            return outcomes
+
+        if self.roster is not None and self.roster.enabled:
+            with self._lock:
+                self._refresh_roster(calls[live[0]].step_id)
+                # Every seat holds its agent before any of them starts, so the first
+                # failure to come back cannot shift into a seat still being launched.
+                for i in live:
+                    cell, agent = calls[i].spec.get("_cell"), calls[i].spec.get("agent")
+                    if cell and agent:
+                        self.roster.note_executed(cell, agent)
+
+        steps = [calls[i].step_id for i in live]
+        workers = min(limit, len(live))
+        self.ctx.tx.event(kind="parallel_start", steps=steps, max_workers=workers)
+        self.ctx.tx.md(f"\n> ⇉ running {len(live)} independent steps at once "
+                       f"(max {workers}): {', '.join(f'`{s}`' for s in steps)}\n")
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="orch-step") as pool:
+            for i in live:
+                peers = tuple(s for s in steps if s != calls[i].step_id)
+                pool.submit(attempt, i, peers)
+        agent_time = sum(o[0].duration or 0.0 for o in (outcomes[i] for i in live)
+                         if isinstance(o, tuple))
+        self.ctx.tx.event(kind="parallel_end", steps=steps,
+                          elapsed=round(time.monotonic() - started, 3),
+                          agent_time=round(agent_time, 3),
+                          failed=[calls[i].step_id for i in live
+                                  if isinstance(outcomes[i], Exception)])
+        return outcomes
+
+    @staticmethod
+    def _raise_worst(outcomes):
+        """Re-raise the failure that decides the run, regardless of finishing order. A
+        guard violation or a bug outranks a provider failure, and a resumable pause must
+        not hide a failure that is not resumable by waiting."""
+        def rank(e):
+            if isinstance(e, GuardViolation):
+                return 0
+            if isinstance(e, AvailabilityPause):
+                return 3
+            return 2 if isinstance(e, AgentError) else 1
+        failed = [o for o in outcomes if isinstance(o, Exception)]
+        if failed:
+            raise min(failed, key=rank)
 
     def _record_attempt(self, step_id, *, phase, iteration, attempt, attempt_kind,
                         agent, role, resp):
@@ -847,17 +989,19 @@ class Engine:
             return False
         if not failure.roster_unavailable:
             return False
-        block = self.roster.block_for_failure(agent, failure)
-        if block is None:
-            return False
-        self._apply_roster_assignment()
-        nxt = self.ctx.workflows[self.workflow].get(cell, {}).get("agent")
+        with self._lock:
+            block = self.roster.block_for_failure(agent, failure)
+            if block is None:
+                return False
+            self._apply_roster_assignment()
+            nxt = self.ctx.workflows[self.workflow].get(cell, {}).get("agent")
+            blocked = self.roster.blocked_selectors()
         self.ctx.tx.event(kind="roster_shift", step=step_id, cell=cell, exhausted=agent,
                           next_agent=nxt, detail=failures.operator_reason(resp)[:200],
                           scope=block.scope, selector=block.selector,
                           retry_at=block.retry_at, failure_kind=block.kind,
                           classification_source=block.source,
-                          blocked_selectors=self.roster.blocked_selectors())
+                          blocked_selectors=blocked)
         span = (f"{block.scope} `{block.selector}`" if block.scope != "agent"
                 else f"`{agent}`")
         until = f" until {block.retry_at}" if block.retry_at else " for this run"
@@ -897,6 +1041,13 @@ class Engine:
             return extract_verdict(role, resp.text) if parse else None
 
         def _abort(e):
+            peers = getattr(self._batch, "peers", None)
+            if peers:
+                # Each step's before/after bracket also spans its peers, so the agent
+                # the guard just named is only one of the candidates.
+                e = GuardViolation(f"{e} This step ran in a parallel batch with "
+                                   f"{', '.join(peers)}, so the change may have been made "
+                                   "by any of them.", labels=e.labels)
             ctx.tx.event(kind="guard_violation", step=step_id, detail=str(e))
             resp.error = ((resp.error or "") + "\n" + str(e)).strip()
             ctx.tx.step(step_id, agent, role, system, user_prompt, resp,
@@ -930,8 +1081,10 @@ class Engine:
             # operator-facing face of P2: the CLI wrote nothing to stderr, so the real
             # message ("You've hit your session limit · resets 10:30pm") sat unread in
             # a JSON body the adapter had already thrown away.
-            raise AgentError(f"agent '{agent}' ({role}) returned {resp.status}: "
+            err = AgentError(f"agent '{agent}' ({role}) returned {resp.status}: "
                              f"{failures.operator_reason(resp)}")
+            err.agent = agent
+            raise err
         return resp, verdict
 
     def _repair_verdict(self, step_id, agent, role, system, user_prompt, resp, allow_edit,
@@ -2687,17 +2840,33 @@ class Engine:
     def _review_panel(self, task, artifact, i):
         """Run the reviewer panel once over `artifact`. Returns the list of
         (cell, lens, verdict, text); skips any lens with no live agent."""
-        reviews = []
+        seats, calls = [], []
         for cell, spec in self._review_reviewer_cells():
             if not spec.get("agent"):
                 self.ctx.tx.md(f"\n> ⚠ no live agent for review lens **{cell}** — skipping.\n")
                 continue
             lens = {"title": spec.get("lens", cell), "focus": spec.get("focus", "")}
-            resp, verdict = self.call(f"review.{cell}", spec,
-                                      self._review_reviewer_prompt(task, artifact, lens),
-                                      phase="review", iteration=i)
-            self.ctx.tx.artifact(f"review-{cell}-{i:02d}.md", resp.text)
-            reviews.append((cell, lens, verdict, resp.text))
+            seats.append((cell, lens))
+            calls.append(_BatchCall(f"review.{cell}", spec,
+                                    self._review_reviewer_prompt(task, artifact, lens),
+                                    "review", i))
+        outcomes = self._call_batch(calls)
+        reviews = []
+        for (cell, lens), outcome in zip(seats, outcomes):
+            if isinstance(outcome, tuple):
+                resp, verdict = outcome
+                self.ctx.tx.artifact(f"review-{cell}-{i:02d}.md", resp.text)
+                reviews.append((cell, lens, verdict, resp.text))
+        # A lens that ran out of agents is a thinner panel, not a stopped run, as long as
+        # another lens answered: every seat holds its agent, so a shift that one at a
+        # time would have left the LAST lens empty here empties the failing one instead.
+        if reviews:
+            for (cell, _lens), outcome in zip(seats, outcomes):
+                if isinstance(outcome, AvailabilityPause):
+                    self.ctx.tx.md(f"\n> ⚠ no live agent for review lens **{cell}** — "
+                                   "skipping.\n")
+            outcomes = [o for o in outcomes if not isinstance(o, AvailabilityPause)]
+        self._raise_worst(outcomes)
         return reviews
 
     def _run_review(self, task, target, iterate=False, max_iters=None):
@@ -2940,12 +3109,15 @@ class Engine:
             feedback = ruling = None
 
             # ---- STAGE 1: developer + devops feasibility (both must be FEASIBLE) ----
-            dv, dvv = self.call("impl.dev_review", dev, self._impl_review_prompt(task, draft),
-                                phase="implreview", iteration=i)
-            self.ctx.tx.artifact(f"implreview-dev-{i:02d}.md", dv.text)
-            ov, ovv = self.call("impl.devops_review", ops, self._impl_review_prompt(task, draft),
-                                phase="implreview", iteration=i)
-            self.ctx.tx.artifact(f"implreview-devops-{i:02d}.md", ov.text)
+            prompt = self._impl_review_prompt(task, draft)
+            outcomes = self._call_batch(
+                [_BatchCall("impl.dev_review", dev, prompt, "implreview", i),
+                 _BatchCall("impl.devops_review", ops, prompt, "implreview", i)])
+            for name, outcome in zip(("dev", "devops"), outcomes):
+                if isinstance(outcome, tuple):
+                    self.ctx.tx.artifact(f"implreview-{name}-{i:02d}.md", outcome[0].text)
+            self._raise_worst(outcomes)
+            (dv, dvv), (ov, ovv) = outcomes
             if dvv != "FEASIBLE" or ovv != "FEASIBLE":
                 force = None in (dvv, ovv) or "HUMAN_REQUIRED" in (dvv, ovv)
                 term = dispatch(*handle("stage1", self._impl_combine(dvv, dv.text, ovv, ov.text),
@@ -3150,26 +3322,37 @@ class Engine:
                   + "\n".join(mr.header_lines()) + "\n```\n")
 
         specs = self._panel_specs()
+        outcomes = self._call_batch(
+            [_BatchCall(f"mrreview.{cell}", spec,
+                        self._mr_expert_prompt(task, mr, spec.get("lens"), n, len(specs)),
+                        "panel", 1)
+             for n, (cell, spec) in enumerate(specs, 1)],
+            stop_on_error=False)
         opinions = []
-        for n, (cell, spec) in enumerate(specs, 1):
-            prompt = self._mr_expert_prompt(task, mr, spec.get("lens"), n, len(specs))
+        for n, ((cell, spec), outcome) in enumerate(zip(specs, outcomes), 1):
             rec = {"n": n, "cell": cell, "agent": spec.get("agent"), "verdict": None, "text": ""}
-            try:
-                resp, verdict = self.call(f"mrreview.{cell}", spec, prompt,
-                                          phase="panel", iteration=1)
-            except AgentError as e:
+            if isinstance(outcome, AgentError):
                 # A dead vendor costs ONE opinion, not the panel: three independent
                 # heads still produce a usable remarks list, and aborting here would
                 # throw away the reviews that already succeeded.
-                rec["error"] = str(e)
-                ctx.tx.event(kind="panel_seat_lost", cell=cell, agent=spec.get("agent"),
-                             detail=str(e)[:400])
-                ctx.tx.md(f"\n> ⚠ panel seat **{cell}** produced no opinion: {e}\n")
+                # The failure's own agent where it names one: by now a peer's shift may
+                # have rewritten this seat's slot.
+                rec["agent"] = outcome.agent or spec.get("agent")
+                rec["error"] = str(outcome)
+                ctx.tx.event(kind="panel_seat_lost", cell=cell, agent=rec["agent"],
+                             detail=str(outcome)[:400])
+                ctx.tx.md(f"\n> ⚠ panel seat **{cell}** produced no opinion: {outcome}\n")
                 opinions.append(rec)
                 continue
-            rec.update(verdict=verdict, text=resp.text or "", agent=spec["agent"])
+            if isinstance(outcome, Exception):
+                continue  # not a lost opinion: _raise_worst below ends the run on it
+            resp, verdict = outcome
+            # resp.agent, not the spec: a peer's shift may have rewritten that slot while
+            # this seat was already running.
+            rec.update(verdict=verdict, text=resp.text or "", agent=resp.agent)
             opinions.append(rec)
-            ctx.tx.artifact(f"opinion-{n}-{spec['agent']}.md", resp.text or "")
+            ctx.tx.artifact(f"opinion-{n}-{resp.agent}.md", resp.text or "")
+        self._raise_worst([o for o in outcomes if not isinstance(o, AgentError)])
 
         usable = [o for o in opinions if o["text"].strip()]
         ctx.tx.event(kind="panel_summary", seats=len(specs), opinions=len(usable),

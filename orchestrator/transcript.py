@@ -15,7 +15,9 @@ Layout per run:
 from __future__ import annotations
 
 import json
+import functools
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -84,8 +86,23 @@ def fmt_version_line(versions) -> str:
     return f"code: {t} · {p} · repos: {repos or '(none watched)'}"
 
 
+def _locked(method):
+    """Run a Transcript mutation under the journal lock (see Transcript.__init__)."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class Transcript:
     def __init__(self, runs_dir, run_id, workflow, task, mock, scenario_name, config_snapshot):
+        # Steps of a parallel panel journal from worker threads. Without this, two
+        # finishing steps could take the same `n` (and overwrite one iteration file) or
+        # interleave run.json. Re-entrant because step() calls event() and md(), and
+        # because the signal handler runs finish() on the main thread, which may already
+        # hold it. Nothing holds it across a provider call, so it is only ever brief.
+        self._lock = threading.RLock()
         self.dir = Path(runs_dir) / run_id
         (self.dir / "iterations").mkdir(parents=True, exist_ok=True)
         (self.dir / "artifacts").mkdir(exist_ok=True)
@@ -144,17 +161,20 @@ class Transcript:
     def _write_meta(self):
         (self.dir / "run.json").write_text(json.dumps(self.meta, indent=2), encoding="utf-8")
 
+    @_locked
     def update_meta(self, **kw):
         """Persist extra fields into run.json (e.g. arch_ref, so an interrupted
         run can be resumed with the same inputs)."""
         self.meta.update(kw)
         self._write_meta()
 
+    @_locked
     def event(self, **kw):
         kw["ts"] = now_utc()
         self._events.write(json.dumps(kw) + "\n")
         self._events.flush()
 
+    @_locked
     def md(self, text: str):
         with open(self._tpath, "a", encoding="utf-8") as f:
             f.write(text + "\n")
@@ -217,6 +237,7 @@ class Transcript:
             f"{level}# Raw failure evidence (bounded head+tail; NOT parsed as an answer)\n\n"
             f"```\n{f.get('raw') or '(provider returned nothing)'}\n```\n")
 
+    @_locked
     def step(self, step_id, agent, role, system, prompt, resp, verdict, iteration, phase):
         self.n += 1
         fn = f"{self.n:02d}-{step_id.replace('.', '-')}-{phase}-i{iteration}.md"
@@ -249,6 +270,7 @@ class Transcript:
                 f"→ **{verdict or resp.status}**\n"
                 f"`{agent}` as *{role}* — [details](iterations/{fn})\n")
 
+    @_locked
     def attempt(self, *, step, phase, iteration, attempt, attempt_kind, agent, role,
                 status, duration, usage=None, cost_usd=None, failure=None):
         """Journal ONE adapter invocation. Additive: never replayed on resume.
@@ -284,14 +306,17 @@ class Transcript:
                 f" · {Transcript._fmt_usage(row.get('usage'), row.get('cost_usd'))}\n")
         return head + Transcript._fmt_failure(row.get("failure"), level="####")
 
+    @_locked
     def artifact(self, name: str, content: str):
         (self.dir / "artifacts" / name).write_text(content, encoding="utf-8")
         self.event(kind="artifact", name=name)
 
+    @_locked
     def disagreements(self, content: str):
         (self.dir / "disagreements.md").write_text(content, encoding="utf-8")
         self.event(kind="disagreements", chars=len(content))
 
+    @_locked
     def write_quality(self, summary: dict) -> None:
         """Stage the run's derived quality signal for publication as `quality.json`.
 
@@ -418,17 +443,21 @@ class Transcript:
                     f"{round(b['duration'])}s |")
         lines = ["\n## Token usage\n",
                  "| scope | steps | attempts | input | cache-create | cache-read | "
-                 "output | total | cost(reported) | wall |",
+                 "output | total | cost(reported) | agent time |",
                  "|---|---|---|---|---|---|---|---|---|---|", row("**TOTAL**", totals)]
         lines += [row(f"agent · {a}", b) for a, b in sorted(by_agent.items())]
         lines += [row(f"phase · {p}", b) for p, b in sorted(by_phase.items())]
         lines += ["",
+                  "Agent time adds up every invocation, so concurrent steps can sum to "
+                  "more than the run's elapsed time (run.json: started, finished).",
+                  "",
                   f"Cost is PROVIDER-REPORTED for {priced} of {attempts} attempt(s); "
                   "the rest ran on transports that report no price and are UNMETERED "
                   "(not $0.00). No price table is used anywhere in this tool."]
         self.md("\n".join(lines) + "\n")
         return totals
 
+    @_locked
     def finish(self, status: str, reason: str, interrupted: bool = False):
         """Finalize the run. `interrupted=True` marks a finalization forced by a signal
         rather than by the engine reaching a terminal state; it publishes no staged

@@ -48,6 +48,12 @@ BASE = Path(__file__).resolve().parent.parent  # the orchestration/ directory
 WORKFLOWS = ("architecture", "development", "investigation", "review", "implreview",
              "mrreview")
 
+# Workflows with steps that are independent by construction: same input, none reads
+# another's output, and all of them always run. Every other loop is a chain of gates
+# where a step's prompt carries the previous step's answer, or a later gate exists to be
+# skipped when an earlier one rejects, so running those together is not an optimisation.
+PARALLEL_WORKFLOWS = frozenset({"review", "implreview", "mrreview"})
+
 _NO_HEAD = "(no git HEAD; diff unavailable)"
 
 # Untracked files are rendered as real new-file diffs, not just listed by name.
@@ -445,6 +451,27 @@ def _validate_semantic_audit(wf, block):
                               f"positive integer, got {value!r}")
 
 
+def _validate_parallel(wf, block):
+    """A `parallel` block opts a workflow's independent panel steps into running at the
+    same time; `max_workers` 1 is the off switch. Only workflows whose engine loop has a
+    panel may carry one, so the block cannot sit in `development` looking as if it
+    speeds that loop up while the engine ignores it."""
+    parallel = block.get("parallel")
+    if parallel is None:
+        return
+    if wf not in PARALLEL_WORKFLOWS:
+        raise ConfigError(f"workflows.json: {wf}.parallel: this workflow has no independent "
+                          f"steps to run in parallel (only {sorted(PARALLEL_WORKFLOWS)} do)")
+    workers = parallel.get("max_workers") if isinstance(parallel, dict) else None
+    unknown = [k for k in (parallel if isinstance(parallel, dict) else ())
+               if k != "max_workers" and not k.startswith("_")]
+    if unknown:
+        raise ConfigError(f"workflows.json: {wf}.parallel has unknown key(s) {unknown}")
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise ConfigError(f"workflows.json: {wf}.parallel must be an object with a positive "
+                          f"integer max_workers (got {parallel!r})")
+
+
 def _validate(agents, workflows):
     if "agents" not in agents:
         raise ConfigError("agents.json: missing top-level 'agents' object")
@@ -465,6 +492,7 @@ def _validate(agents, workflows):
                     f"workflows.json: {wf}.{key} references unknown agent "
                     f"'{spec['agent']}' (known: {sorted(known)})")
         _validate_semantic_audit(wf, workflows[wf])
+        _validate_parallel(wf, workflows[wf])
         _validate_roster(wf, workflows[wf],
                          {n: c for n, c in agents["agents"].items() if not n.startswith("_")})
 

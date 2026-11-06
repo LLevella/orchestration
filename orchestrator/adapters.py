@@ -19,8 +19,10 @@ import math
 import os
 import re
 import shutil
+import signal
 from pathlib import Path
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -50,6 +52,80 @@ _TOOL_MARKUP_RE = re.compile(
     r"<\s*[｜|/\\▁_]*\s*(?:DSML|tool[｜|▁_]*calls|invoke|function[_\s]*calls?)\b.*",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+# Every agent CLI currently running. A killed orchestrator used to leave its CLI behind,
+# still spending and (for the Developer) still editing, because `subprocess.run` keeps
+# the handle to itself. With a parallel panel that would be several at once.
+#
+# Re-entrant because `terminate_children` runs in the signal handler, on the main
+# thread, which may already be holding it inside `_run_child`: a plain Lock would hang
+# the handler there, with no STATUS written and nothing stopped.
+_children: set = set()
+_children_lock = threading.RLock()
+_terminating = False
+
+
+def _signal_group(proc, sig) -> None:
+    """Signal the CLI and everything it started. Each child leads its own session (see
+    `_run_child`), so its pid is the group id. A group already gone is not an error."""
+    try:
+        os.killpg(proc.pid, sig)
+    except OSError:
+        pass
+
+
+def _run_child(cmd, *, input=None, timeout=None, env=None, cwd=None):
+    """`subprocess.run(capture_output=True, text=True)` with the child registered for
+    `terminate_children` while it runs.
+
+    Each child gets its own session so a timeout or a signal reaches what the CLI started
+    too (its shell tool, a test suite), which would otherwise keep running unowned. No
+    terminal is involved: these CLIs run headless, and the orchestrator's signal handler
+    replaces the Ctrl-C the terminal no longer delivers to them.
+
+    The spawn and its registration are one step under the lock, so a handler running on
+    another thread either sees this child or stops it from starting. Only a signal landing
+    on this same thread inside that step can still miss it, and that leaves one orphan,
+    which is what every signal used to leave.
+
+    On timeout it waits for the child rather than calling `communicate()` again, as
+    `subprocess.run` does: a descendant that escaped the group and still holds the pipe
+    would block that read forever."""
+    with _children_lock:
+        if _terminating:
+            raise OSError("the orchestrator is shutting down")
+        proc = subprocess.Popen(cmd,
+                                stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env, cwd=cwd, start_new_session=True)
+        _children.add(proc)
+    with proc:
+        try:
+            try:
+                out, err = proc.communicate(input, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _signal_group(proc, signal.SIGKILL)
+                proc.wait()
+                raise
+            except BaseException:
+                _signal_group(proc, signal.SIGKILL)
+                raise
+        finally:
+            with _children_lock:
+                _children.discard(proc)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def terminate_children() -> None:
+    """SIGTERM every running agent CLI and its descendants, and refuse new ones. For the
+    interrupt handler, which is about to `os._exit`: it never waits for a child."""
+    global _terminating
+    with _children_lock:
+        _terminating = True
+        procs = list(_children)
+    for proc in procs:
+        _signal_group(proc, signal.SIGTERM)
 
 
 def _strip_tool_markup(text):
@@ -467,8 +543,7 @@ class CliAdapter(Adapter):
                                                                local_reason=reason))
         t0 = time.time()
         try:
-            p = subprocess.run(cmd, input=stdin_data, capture_output=True,
-                               text=True, timeout=timeout, env=run_env, cwd=self.cwd)
+            p = _run_child(cmd, input=stdin_data, timeout=timeout, env=run_env, cwd=self.cwd)
         except Exception as e:  # noqa: BLE001 - report any launch/timeout failure
             detail = f"{type(e).__name__}: {e}"
             # Launch/timeout facts are known LOCALLY and outrank any text decoding.

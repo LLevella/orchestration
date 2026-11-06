@@ -133,6 +133,58 @@ python3 orchestrate.py show <run-id>
 Exit code: `0` for a successful conclusion (PASS / READY_FOR_HUMAN_REVIEW /
 ROOT_CAUSE_ESTABLISHED / NO_DEFECT_FOUND), `2` for HUMAN_REQUIRED.
 
+## Parallel steps
+
+Three workflows have steps that are independent by construction: the same input, none
+reads another's output, and all of them always run. They run at the same time.
+
+| Workflow | Steps | `parallel.max_workers` |
+|---|---|---|
+| `mrreview` | the four experts | 4 |
+| `review` | the three lenses | 3 |
+| `implreview` | stage 1 only: developer and DevOps reviewers | 2 |
+
+A clean run makes the same calls as one at a time, so only the elapsed time changes. Over
+18 recorded `mrreview` runs the median panel took 27.6 minutes one after another, and its
+slowest expert 10.8. A run that fails can cost more: `review` and `implreview` used to stop
+at the first failing seat, and now its peers are already running and finish. Their results
+are journaled, so a resume does not pay for them again.
+`parallel.max_workers: 1` in `workflows.json` turns it off, and a workflow with no
+`parallel` block runs one step at a time.
+
+`architecture`, `development` and `investigation` stay sequential, and config validation
+refuses the block there. Each of their gates reads the previous step's answer, or exists
+to be skipped when an earlier gate rejects, so running them together would change what
+they decide and pay for gates that today never run. Their time goes to the steps that do
+the work (a developer step has a 28-minute median), not to waiting between gates. Two dev
+runs cannot share a working tree either, which is why `run-chain.sh` stays one at a time.
+
+What stays the same, and how:
+
+- **Order.** Reviewer numbers, the arbiter's input and the artifacts follow the config,
+  never the finishing order.
+- **Journal.** Steps are numbered in finishing order, and every write takes the
+  transcript's lock. `parallel_start` and `parallel_end` events record `elapsed` and
+  `agent_time`; the `agent time` column in `usage.json`'s table adds up every invocation,
+  so it can exceed the run's elapsed time.
+- **Failures.** Peers run to completion when a seat fails, and each finished step is
+  journaled, so `resume` replays it and re-runs only the rest. The run then ends on the
+  worst outcome regardless of finishing order: guard violation, unexpected error, agent
+  failure, availability pause. A `review` lens that runs out of agents is skipped when
+  another lens answered, and `mrreview` still counts a lost seat as one lost opinion.
+- **Roster.** A seat holds its agent from launch, so a shifting seat can only take an
+  agent nobody is running. The roster refreshes once before the batch, not per step, so
+  eligibility only shrinks while the batch runs. Replacements fill the free agents rather
+  than shifting the whole chain left, so a seat's lens may land on a different vendor than
+  it would have one at a time.
+- **Guard.** Each step keeps its own before/after bracket. Those brackets overlap, so a
+  violation names the overlapping steps instead of blaming one agent. Batches are for
+  read-only steps only: the bracket cannot tell two writers apart.
+- **Signals and timeouts.** SIGTERM and SIGINT now also stop the running agent CLIs and
+  what they started, in every workflow, including a Developer step. Before, a killed
+  orchestrator left its CLI running. A timeout kills the CLI's descendants too. Each CLI
+  runs in its own session, so a SIGKILL of the orchestrator still orphans them.
+
 ## Workflows
 
 ### Architecture (`arch`)

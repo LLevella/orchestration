@@ -174,6 +174,10 @@
   },
   "review": {
     "_comment": "Adversarial PANEL review of an arbitrary target artifact (a document, design, proposal, or diff passed via --target; falls back to --task). Each reviewer cell attacks ONE lens (correctness / completeness / risk); the Review Arbiter then consolidates, deduplicates, ranks by severity, and issues STRONG / NEEDS_REVISION / WEAK. Repo-INDEPENDENT: the full artifact is inlined into every prompt (so even an API-only agent with no file access can review it) and reviewers do not read the code repos; there is no editing step (all calls read-only). A produced synthesis ends REVIEW_COMPLETE (success, exit 0) regardless of the quality verdict; only no-live-agent / INSUFFICIENT_INPUT ends HUMAN_REQUIRED. Agents resolved by `roster` at run start (shift-left around a disabled/exhausted agent). Added 2026-07-09 (Irina).",
+    "parallel": {
+      "_comment": "Irina 2026-11-06: The lenses read the same artifact, none sees another, and all always run. A clean run makes the same calls as one at a time; a failing seat cannot recall peers already running, so they finish and stay resumable. While a batch runs, a failing seat takes a free agent instead of shifting the chain, so the positional mapping in the roster comment describes one-at-a-time only. max_workers 1 turns it off. See README, Parallel steps.",
+      "max_workers": 3
+    },
     "max_iterations": 10,
     "arbitration": {
       "trigger_after_cycles": 2
@@ -232,6 +236,10 @@
   },
   "implreview": {
     "_comment": "Implementation-readiness review of an ARBITRARY artifact (plan/design/proposal via --target, falling back to --task): 6 roles, a 3-stage cyclic gate with back-edges (Irina 2026-07-14). Stage 1 — the Implementation Architect (author; OWNS + revises the artifact) loops with TWO peer reviewers (Advanced Developer + DevOps) until BOTH return FEASIBLE. Stage 2 — the Implementation Tech Lead verifies (NEEDS_REVISION -> back to stage 1). Stage 3 — the Project Manager delivery-gate (NEEDS_REVISION -> back to stage 1). The Arbiter (independent family) breaks a deadlock (same block > trigger_after_cycles) or an explicit ESCALATE, and may APPROVE / order one revision / defer to a human. Read-only: the author returns the revised artifact TEXT (parse=False); nothing edits repo files. A PM/Arbiter APPROVED ends IMPLREVIEW_COMPLETE (success); budget-exhaustion / arbiter-stop ends HUMAN_REQUIRED. implreview-final.md is a CANDIDATE (not auto-adopted). Agents resolved by `roster` at run start (shift-left around a disabled/exhausted agent).",
+    "parallel": {
+      "_comment": "Irina 2026-11-06: Stage 1 only: both reviewers read the same draft and both always run. The later gates stay sequential because each prompt carries the previous answer. A clean run makes the same calls as one at a time; a failing seat cannot recall peers already running, so they finish and stay resumable. While a batch runs, a failing seat takes a free agent instead of shifting the chain, so the positional mapping in the roster comment describes one-at-a-time only. max_workers 1 turns it off. See README, Parallel steps.",
+      "max_workers": 2
+    },
     "max_iterations": 5,
     "arbitration": {
       "trigger_after_cycles": 2
@@ -293,6 +301,10 @@
   },
   "mrreview": {
     "_comment": "MR REVIEW PANEL (added 2026-08-21, Irina; merged in 2026-08-26 as `mrreview` so it does not collide with `review`, which reviews an ARTIFACT with three adversarial lenses and an arbiter). Four experts review the SAME merge request INDEPENDENTLY - no cross-talk, no iteration, no gate: the deliverable is a LIST OF CODE REMARKS for the author, not a PASS/FAIL verdict, so nothing here blocks or re-runs anybody. Each expert carries one `lens` as EMPHASIS (it still reviews the whole diff) so four opinions cover more ground than four generalists would. A fifth step (Review Moderator) merges the four opinions into one deduplicated, severity-ranked list and the orchestrator writes it to runs/<id>/artifacts/mr-review.md; the moderator may never invent a finding the panel did not make. Experts appear in the document as Reviewer 1..4 - who was who stays in the run dir, not in the deliverable. Agents are resolved by `roster` at run start; an expert cell whose agent is dead shifts left, so a dead vendor costs one opinion at worst, never the run (>=2 opinions still produce the document).",
+    "parallel": {
+      "_comment": "Irina 2026-11-06: The experts read the same diff and must not see each other; the corpus median was 27.6 min of a 30.8 min run spent on them one after another. A clean run makes the same calls as one at a time; a failing seat cannot recall peers already running, so they finish and stay resumable. While a batch runs, a failing seat takes a free agent instead of shifting the chain, so the positional mapping in the roster comment describes one-at-a-time only. max_workers 1 turns it off. See README, Parallel steps.",
+      "max_workers": 4
+    },
     "max_iterations": 1,
     "roster": {
       "_comment": "Four DIFFERENT model families sit on the panel by construction - the roster assigns each cell a distinct agent, so with everything live the panel is codex . claude_reviewer(opus, max-effort) . gemini . deepseek and claude_sonnet moderates. Nothing is pinned: the point of the panel is four independent heads, and which vendor supplies each of them does not change that. With codex disabled the chain shifts left (claude_reviewer, gemini, deepseek, claude_sonnet on the panel, claude moderating).",

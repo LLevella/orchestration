@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from orchestrator.adapters import build_adapters  # noqa: E402
+from orchestrator.adapters import build_adapters, terminate_children  # noqa: E402
 from orchestrator import mr as mrlib  # noqa: E402
 from orchestrator.config import (BASE, WORKFLOWS, ConfigError, RunContext,  # noqa: E402
                                  load_config, project_base, resolve_repos)
@@ -62,6 +62,7 @@ def _install_interrupt_handler(tx):
 
     def _handler(signum, _frame):
         try:
+            terminate_children()
             tx.finish(HUMAN_REQUIRED,
                       f"Interrupted by signal {signum} (host freeze/stop/reboot or Ctrl-C). "
                       f"Resume with: python3 orchestrate.py resume {tx.run_id}",

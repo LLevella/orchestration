@@ -37,7 +37,7 @@ def _completed(stdout="", stderr="", returncode=0):
 
 
 class _FakeRun:
-    """Stands in for subprocess.run so no CLI is ever launched."""
+    """Stands in for adapters._run_child so no CLI is ever launched."""
     def __init__(self, result):
         self.result = result
 
@@ -49,11 +49,11 @@ def _run_cli(monkey_result, cfg=None):
     ad = CliAdapter("claude_reviewer", dict(cfg or CLAUDE_CFG))
     ad.availability = lambda: (True, "ok")           # no PATH dependency
     import orchestrator.adapters as mod
-    real, mod.subprocess.run = mod.subprocess.run, _FakeRun(monkey_result)
+    real, mod._run_child = mod._run_child, _FakeRun(monkey_result)
     try:
         return ad.run("sys", "prompt")
     finally:
-        mod.subprocess.run = real
+        mod._run_child = real
 
 
 class TestCapturedSessionLimit(unittest.TestCase):
@@ -200,11 +200,11 @@ class TestErrorBodySemantics(unittest.TestCase):
 
         def boom(*a, **kw):
             raise subprocess.TimeoutExpired(cmd="claude", timeout=900)
-        real, mod.subprocess.run = mod.subprocess.run, boom
+        real, mod._run_child = mod._run_child, boom
         try:
             resp = ad.run("sys", "prompt")
         finally:
-            mod.subprocess.run = real
+            mod._run_child = real
         self.assertEqual(resp.status, ERROR)
         self.assertEqual(resp.failure.kind, failures.TIMEOUT)
         self.assertEqual(resp.failure.classification_source, failures.SRC_LOCAL)
